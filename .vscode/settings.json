@@ -1,0 +1,18 @@
+{
+    "idf.currentSetup": "C:\\esp\\v6.1\\esp-idf",
+    "idf.openOcdConfigs": [
+        "board/esp32c3-builtin.cfg"
+    ],
+    "idf.customExtraVars": {
+        "IDF_TARGET": "esp32c3"
+    },
+    "clangd.path": "C:\\Espressif\\tools\\esp-clang\\esp-20.1.1_20250829\\esp-clang\\bin\\clangd.exe",
+    "clangd.arguments": [
+      "--background-index",
+      "--query-driver=**",
+      "--compile-commands-dir=c:\\Users\\ckchow\\Desktop\\i2c_dmp_quat9_orientation\\build"
+    ],
+    "idf.flashType": "JTAG",
+    "idf.port": "COM4",
+    "C_Cpp.default.compilerPath": "c:/Users/ckchow/Desktop/i2c_dmp_quat9_orientation/build/compile_commands.json"
+}
