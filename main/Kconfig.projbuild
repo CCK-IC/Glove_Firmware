@@ -1,17 +1,528 @@
-menu "ICM-20948 Example"
+mainmenu "Project configuration"
+    menu "Hardware Board Configuration"
 
-    config I2C_MASTER_SCL
-        int "SCL GPIO Num"
-        default 36 if IDF_TARGET_ESP32S3
-        default 19 if IDF_TARGET_ESP32 || IDF_TARGET_ESP32S2
-        help
-            GPIO number for I2C Master clock line.
+        choice TARGET_BOARD
+            prompt "Target Seeed Studio XIAO board"
+            default TARGET_BOARD_XIAO_ESP32_C3
 
-    config I2C_MASTER_SDA
-        int "SDA GPIO Num"
-        default 35 if IDF_TARGET_ESP32S3
-        default 18 if IDF_TARGET_ESP32 || IDF_TARGET_ESP32S2
-        help
-            GPIO number for I2C Master data line.
+        config TARGET_BOARD_XIAO_ESP32_C3
+            bool "Seeed Studio XIAO ESP32-C3"
 
-endmenu
+        config TARGET_BOARD_XIAO_ESP32_S3
+            bool "Seeed Studio XIAO ESP32-S3"
+            
+        config BOARD_USE_CUSTOM_PINS
+            bool "Override board GPIO assignments"
+            # default n
+
+        endchoice
+
+
+        config XIAO_C3_I2C_SCL_GPIO
+            int
+            default 7
+        config XIAO_C3_I2C_SDA_GPIO
+            int
+            default 6
+        config XIAO_C3_LED_GPIO
+            int
+            default 21
+        config XIAO_C3_BATTERY_ADC_GPIO
+            int
+            default 2
+        config XIAO_C3_BUTTON_GPIO
+            int
+            default 9
+        config XIAO_C3_POWER_HOLD_GPIO
+            int
+            default 5
+
+        config XIAO_S3_I2C_SCL_GPIO
+            int
+            default 6
+        config XIAO_S3_I2C_SDA_GPIO
+            int
+            default 5
+        config XIAO_S3_LED_GPIO
+            int
+            default 43
+        config XIAO_S3_BATTERY_ADC_GPIO
+            int
+            default 1
+        config XIAO_S3_BUTTON_GPIO
+            int
+            default 0
+        config XIAO_S3_POWER_HOLD_GPIO
+            int
+            default 4
+
+        if BOARD_USE_CUSTOM_PINS
+
+            config BOARD_I2C_SCL_GPIO
+                int "I2C SCL GPIO"
+                range 0 48
+                default 7
+
+            config BOARD_I2C_SDA_GPIO
+                int "I2C SDA GPIO"
+                range 0 48
+                default 6
+
+            config BOARD_LED_GPIO
+                int "WS2812 data GPIO"
+                range 0 48
+                default 21
+
+            config BOARD_BATTERY_ADC_GPIO
+                int "Battery ADC GPIO"
+                range 0 48
+                default 2
+
+            config BOARD_BUTTON_GPIO
+                int "Button GPIO"
+                range 0 48
+                default 9
+
+            config BOARD_POWER_HOLD_GPIO
+                int "Power-hold GPIO"
+                range 0 48
+                default 5
+
+        endif
+
+        config BOARD_I2C_PORT
+            int "I2C port"
+            range 0 1
+            default 0
+
+        config BOARD_I2C_FREQUENCY_HZ
+            int "I2C frequency"
+            range 10000 1000000
+            default 400000
+
+        config BOARD_BUTTON_ACTIVE_LEVEL
+            int "Button active level"
+            range 0 1
+            default 0
+            help
+                0 or 1
+
+        config BOARD_LED_ACTIVE_LEVEL
+            int "LED metadata active level"
+            range 0 1
+            default 1
+            help
+                WS2812 LEDs use a coded waveform and cannot be inverted as a normal
+                active-level GPIO. This setting is retained for board metadata.
+
+        config POWER_HOLD_ACTIVE_LEVEL
+            int "Power-hold asserted level"
+            range 0 1
+            default 1
+            help
+                0 or 1
+        if TARGET_BOARD_XIAO_ESP32_S3
+            config BOARD_S3_GPIO43_CONSOLE_WARNING
+                bool "Warn when ESP32-S3 LED uses GPIO43"
+                default y
+        endif
+
+    endmenu
+
+    menu "ICM-20948 Configuration"
+
+        config IMU_I2C_ADDRESS
+            hex "ICM-20948 I2C address"
+            range 0x68 0x69
+            default 0x68
+
+        config IMU_DMP_RATE_HZ
+            int "Normal acquisition/notification rate"
+            range 1 200
+            default 100
+
+        config IMU_SLOW_RATE_HZ
+            int "Slow/debug rate"
+            range 1 100
+            default 25
+
+        config IMU_I2C_RETRIES
+            int "I2C transaction retries"
+            range 1 10
+            default 3
+
+        config IMU_ERROR_REINIT_COUNT
+            int "Errors before FIFO recovery"
+            range 1 100
+            default 5
+
+        config IMU_DMP_ENABLED
+            bool "Enable managed-component DMP integration"
+            default n
+            help
+                Requires the managed component's legal DMP image and API.
+                Also enable CONFIG_ICM_20948_USE_DMP in the component menu.
+
+        config IMU_SYNTHETIC_FALLBACK
+            bool "Use marked synthetic quaternion if DMP data is unavailable"
+            default n
+
+        config IMU_RAW_ENABLED
+            bool "Enable raw accelerometer, gyroscope, magnetometer and temperature data"
+            default y
+            help
+                Reads native AGMT data from the ICM-20948 in the existing IMU
+                acquisition task and exposes it through UUID_IMU_RAW.
+
+        config IMU_RAW_RATE_HZ
+            int "Raw sensor acquisition rate"
+            depends on IMU_RAW_ENABLED
+            range 1 200
+            default 100
+            help
+                Requested rate for icm20948_get_agmt calls. The measured rate is
+                included in Full Raw v1 packets.
+
+        config IMU_RAW_DMP_ACCEL_RANGE_CODE
+            int "DMP profile accelerometer range code"
+            depends on IMU_RAW_ENABLED && IMU_DMP_ENABLED
+            range 0 3
+            default 1
+            help
+                Active accelerometer range after DMP initialization:
+                0 = +/-2g, 1 = +/-4g, 2 = +/-8g, 3 = +/-16g.
+                This must match the selected managed or application DMP profile.
+
+        config IMU_RAW_DMP_GYRO_RANGE_CODE
+            int "DMP profile gyroscope range code"
+            depends on IMU_RAW_ENABLED && IMU_DMP_ENABLED
+            range 0 3
+            default 3
+            help
+                Active gyroscope range after DMP initialization:
+                0 = +/-250dps, 1 = +/-500dps, 2 = +/-1000dps,
+                3 = +/-2000dps. This must match the selected managed or
+                application DMP profile.
+
+    endmenu
+
+    menu "Battery Configuration"
+
+        choice BATTERY_ADC_ATTEN
+            prompt "ADC attenuation"
+            default BATTERY_ADC_ATTEN_12DB
+
+            config BATTERY_ADC_ATTEN_0DB
+                bool "0 dB"
+            config BATTERY_ADC_ATTEN_2_5DB
+                bool "2.5 dB"
+            config BATTERY_ADC_ATTEN_6DB
+                bool "6 dB"
+            config BATTERY_ADC_ATTEN_12DB
+                bool "12 dB"
+
+        endchoice
+
+        config BATTERY_DIVIDER_NUMERATOR
+            int "Battery divider numerator X"
+            range 1 1000
+            default 2
+            help
+                "X/Y" Multiplier for ADC to show real battery voltage
+
+        config BATTERY_DIVIDER_DENOMINATOR
+            int "Battery divider denominator Y"
+            range 1 1000
+            default 1
+            help
+                "X/Y" Multiplier for ADC to show real battery voltage
+
+        config BATTERY_FULL_MV
+            int "Full battery voltage"
+            default 4200
+
+        config BATTERY_EMPTY_MV
+            int "Empty battery voltage"
+            default 3300
+
+        config BATTERY_LOW_MV
+            int "Low battery threshold"
+            default 3500
+
+        config BATTERY_CALIBRATION_OFFSET_MV
+            int "Battery calibration offset in mV"
+            range -1000 1000
+            default 0
+
+        config BATTERY_CALIBRATION_GAIN_PERMILLE
+            int "Battery calibration gain, per mille"
+            range 500 1500
+            default 1000
+
+        config BATTERY_AVERAGE_SAMPLES
+            int "ADC averaging samples"
+            range 1 128
+            default 16
+
+        config BATTERY_STATUS_PERIOD_MS
+            int "Battery/status period"
+            range 250 60000
+            default 1000
+
+    endmenu
+
+    menu "Button Configuration"
+
+        config BUTTON_DEBOUNCE_MS
+            int "Debounce period"
+            range 10 200
+            default 40
+
+        config BUTTON_CLICK_WINDOW_MS
+            int "Multi-click completion window"
+            range 200 1000
+            default 450
+
+        config BUTTON_HOLD_MS
+            int "Pairing hold threshold"
+            range 500 10000
+            default 1800
+
+    endmenu
+
+    menu "LED Configuration"
+
+        choice LED_ORDER
+            prompt "RGB channel order"
+            default LED_ORDER_GRB
+
+            config LED_ORDER_RGB
+                bool "RGB"
+            config LED_ORDER_GRB
+                bool "GRB"
+            config LED_ORDER_BRG
+                bool "BRG"
+
+        endchoice
+
+        config LED_BRIGHTNESS_LIMIT
+            int "Maximum LED brightness"
+            range 1 255
+            default 64
+            help
+                Ranged [1 - 255]
+
+    endmenu
+
+    menu "BLE Security and Pairing"
+
+        config BLE_SECURITY
+            bool "Enable BLE link security"
+            default y
+
+        config BLE_BONDING
+            bool "Enable bonding"
+            depends on BLE_SECURITY
+            default y
+
+        config BLE_SECURE_CONNECTIONS
+            bool "Require LE Secure Connections when supported"
+            depends on BLE_SECURITY
+            default y
+
+        config BLE_PAIRING_TIMEOUT_MS
+            int "Pairing-mode timeout"
+            range 5000 300000
+            default 60000
+
+        config BLE_ERASE_BONDS_ON_PAIRING
+            bool "Erase all bonds when pairing mode begins"
+            default n
+
+        config BLE_DEV_STATIC_PASSKEY
+            bool "INSECURE: enable development static passkey"
+            default n
+
+        config BLE_STATIC_PASSKEY
+            int "Development static passkey"
+            range 0 999999
+            default 123456
+            depends on BLE_DEV_STATIC_PASSKEY
+
+        config APP_PERSIST_RATE_MODE
+            bool "Persist rate mode in NVS"
+            default n
+            help
+                Reserved integration option. The reference implementation keeps the
+                mode in RAM until an application NVS schema is added.
+
+    endmenu
+
+    menu "Power Configuration"
+
+        config POWER_OFF_LED_MS
+            int "Power-off LED indication time"
+            range 100 10000
+            default 1000
+
+        config POWER_LATCH_TEST_MODE
+            bool "Do not release power latch; use deep-sleep fallback"
+            default y
+
+    endmenu
+
+    menu "Diagnostics and Test Modes"
+
+        config DIAGNOSTICS_LOG_PERIOD_MS
+            int "Diagnostics log period; 0 disables periodic logs"
+            range 0 600000
+            default 10000
+
+        config TEST_LED
+            bool "LED pattern test mode"
+            default n
+
+        config TEST_BUTTON
+            bool "Log all debounced button events"
+            default n
+
+        config TEST_BATTERY
+            bool "Log battery ADC details"
+            default n
+
+        config TEST_BLE
+            bool "Enable BLE diagnostic behavior"
+            default n
+
+    endmenu
+
+    menu "BLE Compatibility"
+
+        config BLE_COMPATIBILITY_MODE
+            bool "Enable conservative BLE 4.2 compatibility defaults"
+            default y
+            help
+                Uses legacy-compatible security behavior, avoids immediate security
+                and connection-update procedures, uses LE 1M legacy advertising, and
+                permits compact packets at ATT MTU 23.
+
+        config BLE_INITIATE_SECURITY_ON_CONNECT
+            bool "Initiate security immediately after connection"
+            default n
+            help
+                This can race MTU exchange and service discovery on some older
+                clients. Leave disabled for maximum interoperability.
+
+        config BLE_PREFER_SECURE_CONNECTIONS
+            bool "Prefer LE Secure Connections"
+            depends on BLE_SECURITY
+            default n if BLE_COMPATIBILITY_MODE
+            default y
+            help
+                LE Secure Connections is not universally reliable on older BLE 4.2
+                clients. The compatibility profile permits legacy pairing.
+
+        config BLE_REQUEST_CONNECTION_UPDATE
+            bool "Request connection parameters from the peripheral"
+            default n if BLE_COMPATIBILITY_MODE
+            default y
+
+        config BLE_CONNECTION_UPDATE_DELAY_MS
+            int "Delay before connection-parameter request"
+            depends on BLE_REQUEST_CONNECTION_UPDATE
+            range 500 30000
+            default 3000
+
+        config BLE_CONN_INTERVAL_MIN_UNITS
+            int "Minimum connection interval in 1.25 ms units"
+            depends on BLE_REQUEST_CONNECTION_UPDATE
+            range 6 3200
+            default 12
+            help
+                Default 12 is 15 ms.
+
+        config BLE_CONN_INTERVAL_MAX_UNITS
+            int "Maximum connection interval in 1.25 ms units"
+            depends on BLE_REQUEST_CONNECTION_UPDATE
+            range 6 3200
+            default 24
+            help
+                Default 24 is 30 ms.
+
+        config BLE_CONN_LATENCY
+            int "Connection latency"
+            depends on BLE_REQUEST_CONNECTION_UPDATE
+            range 0 499
+            default 0
+
+        config BLE_CONN_SUPERVISION_TIMEOUT_UNITS
+            int "Supervision timeout in 10 ms units"
+            depends on BLE_REQUEST_CONNECTION_UPDATE
+            range 10 3200
+            default 600
+            help
+                Default 600 is 6 seconds.
+
+        config BLE_COMPACT_PACKET_FALLBACK
+            bool "Use compact packets when ATT MTU is small"
+            default y
+
+        config BLE_LOG_GAP_DETAILS
+            bool "Log detailed GAP and security events"
+            default y
+
+    endmenu
+
+    menu "ICM-20948 DMP Rate Policy"
+
+        choice IMU_DMP_PROFILE
+            prompt "DMP initialization profile"
+            default IMU_DMP_PROFILE_MANAGED_DEFAULT
+
+            config IMU_DMP_PROFILE_MANAGED_DEFAULT
+                bool "Managed component default, approximately 55-56 Hz"
+                help
+                    Safest profile. Uses the managed component's complete and internally
+                    consistent initialization sequence.
+
+            config IMU_DMP_PROFILE_APPLICATION_OVERRIDE
+                bool "Externally supplied validated strong application override"
+                help
+                    Select only when a complete application-owned implementation of
+                    icm20948_init_dmp_sensor_with_defaults is supplied separately.
+                    The project intentionally does not fabricate or copy that code.
+        endchoice
+
+        config IMU_DMP_MANAGED_RATE_HZ
+            int "Expected managed DMP output rate"
+            depends on IMU_DMP_PROFILE_MANAGED_DEFAULT
+            range 1 225
+            default 56
+            help
+                Used for diagnostics and rate policy. Actual rate is measured at
+                runtime and remains authoritative.
+        config IMU_DMP_OVERIDE_RATE_HZ
+            int "Expected overide DMP output rate"
+            depends on IMU_DMP_PROFILE_APPLICATION_OVERRIDE
+            range 1 225
+            default 112
+            help
+                Used for diagnostics and rate policy. Actual rate is measured at
+                runtime and remains authoritative.
+        
+
+        config IMU_FIFO_POLL_RATE_HZ
+            int "DMP FIFO polling rate"
+            range 20 500
+            default 200
+            help
+                Polling faster than the DMP output rate helps drain the FIFO. It does
+                not increase the DMP quaternion rate.
+
+        config IMU_NOTIFY_DUPLICATE_SAMPLES
+            bool "Allow duplicate-sequence quaternion notifications"
+            default n
+            help
+                Disabled by default because repeated samples falsely imply a higher
+                sensor rate and waste BLE bandwidth.
+    endmenu
