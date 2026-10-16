@@ -155,12 +155,12 @@ static int access_cb(uint16_t conn, uint16_t attr,
         system_state_snapshot(&st);
 
         switch (data[0]) {
-        // case 0x01:
-        //     if (len != 3 || value < 1 || value > 200)
-        //         return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
-        //     st.requested_rate_hz = value;
-        //     system_state_replace(&st);
-        //     break;
+        case 0x01:
+            if (len != 3 || value < 1 || value > 200)
+                return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+            st.requested_rate_hz = value;
+            system_state_replace(&st);
+            break;
         case 0x02:
             if (len != 3 || value < 250)
                 return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
@@ -170,14 +170,14 @@ static int access_cb(uint16_t conn, uint16_t attr,
         case 0x03:
             app_event_publish(APP_EVENT_BUTTON_HOLD, 0);
             break;
-        // case 0x04:
-        //     if (len != 2 || data[1] > 1)
-        //         return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
-        //     st.slow_mode = data[1];
-        //     st.requested_rate_hz = data[1] ?
-        //         CONFIG_IMU_SLOW_RATE_HZ : CONFIG_IMU_RATE_HZ;
-        //     system_state_replace(&st);
-        //     break;
+        case 0x04:
+            if (len != 2 || data[1] > 1)
+                return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+            st.slow_mode = data[1];
+            st.requested_rate_hz = data[1] ?
+                CONFIG_IMU_SLOW_RATE_HZ : CONFIG_IMU_RAW_RATE_HZ;
+            system_state_replace(&st);
+            break;
         case 0x05:
             if (len != 3 || data[1] != 0xA5 || data[2] != 0x5A)
                 return BLE_ATT_ERR_WRITE_NOT_PERMITTED;

@@ -16,7 +16,7 @@
 #include "icm20948_i2c.h"
 
 static const char *TAG = "imu";
-static i2c_master_dev_handle_t s_i2c_dev;
+// static i2c_master_dev_handle_t s_i2c_dev;
 static icm20948_device_t s_icm;
 static icm0948_config_i2c_t icm_config;
 // static icm20948_serif_t s_serif;
@@ -130,7 +130,7 @@ static esp_err_t configure_sensor(void)
         .scl_speed_hz = CONFIG_BOARD_I2C_FREQUENCY_HZ,
     };
     esp_err_t err = i2c_master_bus_add_device(board_i2c_bus(),
-                                               &cfg, &s_i2c_dev);
+                                               &cfg, &icm_config.dev_handle);
     if (err != ESP_OK) return err;
 
     // icm20948_init_struct(&s_icm);
@@ -158,11 +158,19 @@ static esp_err_t configure_sensor(void)
 
 
     uint8_t who = 0;
-    if (icm20948_get_who_am_i(&s_icm, &who) != ICM_20948_STAT_OK ||
-        who != ICM_20948_WHOAMI) {
-        ESP_LOGE(TAG, "WHO_AM_I=0x%02x, expected 0x00", who);
-        return ESP_ERR_NOT_FOUND;
-    } else ESP_LOGI(TAG, "DMP WHO OK: 0x%02x", who);
+    esp_err_t rc = icm20948_get_who_am_i(&s_icm, &who);
+    for (uint8_t i = 0; i < 10; i++)
+    {
+        if (rc != ICM_20948_STAT_OK ||
+            who != ICM_20948_WHOAMI) {
+            ESP_LOGE(TAG, "Trial %d: WHO_AM_I=0x%02x, expected 0x%02x", i, who, ICM_20948_WHOAMI);
+        } else {
+            ESP_LOGI(TAG, "DMP WHO OK: 0x%02x", who);
+            break;
+        }
+    }
+    
+    if(rc != ICM_20948_STAT_OK)return ESP_ERR_NOT_FOUND;
 
     system_state_t st;
     system_state_snapshot(&st);
@@ -200,6 +208,11 @@ static esp_err_t configure_sensor(void)
 	// Now wake the sensor up
 	icm20948_sleep(&s_icm, false);
 	icm20948_low_power(&s_icm, false);
+    if (icm20948_configure_magnetometer(&s_icm, AK09916_MODE_CONT_100_HZ) != ICM_20948_STAT_OK) {
+		ESP_LOGE(TAG, "magnetometer configuration failed");
+		return ESP_ERR_NOT_FOUND;
+	}
+
 
 #if CONFIG_IMU_DMP_ENABLED
     icm20948_status_e rc = icm20948_init_dmp_sensor_with_defaults(&s_icm); //TOBE overided
@@ -403,10 +416,11 @@ static void task_main(void *arg)
 
 #if CONFIG_IMU_RAW_ENABLED
         uint64_t raw_now_us = esp_timer_get_time();
-        if (s_sensor_ok && raw_now_us >= raw_due_us) {
-            const uint32_t raw_rate =
-                CONFIG_IMU_RAW_RATE_HZ ? CONFIG_IMU_RAW_RATE_HZ : 1;
-            raw_due_us = raw_now_us + 1000000ULL / raw_rate;
+        if (s_sensor_ok /* && raw_now_us >= raw_due_us */) {
+            // remove the raw sample rate limit for now, since we are not using it
+            // const uint32_t raw_rate =
+            //     CONFIG_IMU_RAW_RATE_HZ ? CONFIG_IMU_RAW_RATE_HZ : 1;
+            // raw_due_us = raw_now_us + 1000000ULL / raw_rate;
 
             icm20948_agmt_t agmt = {0};
             if (icm20948_get_agmt(&s_icm, &agmt) ==
