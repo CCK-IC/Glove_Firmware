@@ -15,21 +15,22 @@
 const ble_uuid128_t UUID_IMU_SERVICE = XIAO_UUID128(0x01);
 // const ble_uuid128_t UUID_IMU_QUAT = XIAO_UUID128(0x02);
 const ble_uuid128_t UUID_IMU_RAW = XIAO_UUID128(0x99);
-// const ble_uuid128_t UUID_AUX_SERVICE = XIAO_UUID128(0x10);
-// const ble_uuid128_t UUID_AUX_DATA = XIAO_UUID128(0x11);
+const ble_uuid128_t UUID_AUX_SERVICE = XIAO_UUID128(0x10);
+const ble_uuid128_t UUID_AUX_DATA = XIAO_UUID128(0x11);
 const ble_uuid128_t UUID_STATUS_SERVICE = XIAO_UUID128(0x20);
 const ble_uuid128_t UUID_STATUS_DATA = XIAO_UUID128(0x21);
 const ble_uuid128_t UUID_CONTROL = XIAO_UUID128(0x22);
 
 // uint16_t gatt_imu_handle;
 uint16_t gatt_imu_raw_handle;
-// uint16_t gatt_aux_handle;
+uint16_t gatt_aux_handle;
 uint16_t gatt_status_handle;
 uint16_t gatt_control_handle;
 uint16_t gatt_battery_handle;
 
 // static bool s_imu_notify;
 static bool s_imu_raw_notify;
+static bool s_aux_notify;
 static bool s_status_notify;
 static bool s_battery_notify;
 static uint8_t s_control_reply[4];
@@ -101,12 +102,12 @@ static int access_cb(uint16_t conn, uint16_t attr,
             return BLE_ATT_ERR_READ_NOT_PERMITTED;
 #endif
         }
-        // if (attr == gatt_aux_handle) {
-        //     int16_t values[8] = {0};
-        //     uint8_t data[APP_AUX_PACKET_SIZE];
-        //     ble_encode_aux(data, esp_timer_get_time() / 1000, 0, values);
-        //     return append(ctxt->om, data, sizeof(data));
-        // }
+        if (attr == gatt_aux_handle) {
+            int16_t values[8] = {0};
+            uint8_t data[AUX_PACKET_V1_SIZE];
+            ble_encode_aux(data, esp_timer_get_time() / 1000, 0, values);
+            return append(ctxt->om, data, sizeof(data));
+        }
         if (attr == gatt_status_handle) {
             uint8_t packet[STATUS_PACKET_FULL_SIZE];
             size_t len = ble_encode_status_for_mtu(
@@ -176,6 +177,9 @@ static int access_cb(uint16_t conn, uint16_t attr,
             st.slow_mode = data[1];
             st.requested_rate_hz = data[1] ?
                 CONFIG_IMU_SLOW_RATE_HZ : CONFIG_IMU_RAW_RATE_HZ;
+            ESP_LOGI("BLE_CTRL", "slow_mode=%u, rate=%luHz",
+                     st.slow_mode,
+                     (unsigned long)st.requested_rate_hz);            
             system_state_replace(&st);
             break;
         case 0x05:
@@ -241,18 +245,18 @@ static const struct ble_gatt_svc_def services[] = {
             }, {0}
         }
     },
-    // {
-    //     .type = BLE_GATT_SVC_TYPE_PRIMARY,
-    //     .uuid = &UUID_AUX_SERVICE.u,
-    //     .characteristics = (struct ble_gatt_chr_def[]) {
-    //         {
-    //             .uuid = &UUID_AUX_DATA.u,
-    //             .access_cb = access_cb,
-    //             .val_handle = &gatt_aux_handle,
-    //             .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
-    //         }, {0}
-    //     }
-    // },
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &UUID_AUX_SERVICE.u,
+        .characteristics = (struct ble_gatt_chr_def[]) {
+            {
+                .uuid = &UUID_AUX_DATA.u,
+                .access_cb = access_cb,
+                .val_handle = &gatt_aux_handle,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+            }, {0}
+        }
+    },
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &UUID_STATUS_SERVICE.u,
@@ -294,11 +298,13 @@ void gatt_set_subscription(uint16_t attr, bool enabled)
 {
     // if (attr == gatt_imu_handle) s_imu_notify = enabled;
     if (attr == gatt_imu_raw_handle) s_imu_raw_notify = enabled;
+    if (attr == gatt_aux_handle) s_aux_notify = enabled;
     if (attr == gatt_status_handle) s_status_notify = enabled;
     if (attr == gatt_battery_handle) s_battery_notify = enabled;
 }
 
 // bool gatt_imu_subscribed(void) { return s_imu_notify; }
 bool gatt_imu_raw_subscribed(void) { return s_imu_raw_notify; }
+bool gatt_aux_subscribed(void) { return s_aux_notify; }
 bool gatt_status_subscribed(void) { return s_status_notify; }
 bool gatt_battery_subscribed(void) { return s_battery_notify; }

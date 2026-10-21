@@ -27,7 +27,7 @@ static imu_raw_sample_t s_latest_raw;
 static TaskHandle_t s_task;
 static volatile bool s_running;
 static bool s_sensor_ok;
-static uint32_t s_sequence;
+// static uint32_t s_sequence;
 static uint32_t s_raw_sequence;
 static uint8_t s_accel_range_code;
 static uint8_t s_gyro_range_code;
@@ -269,23 +269,23 @@ static void task_main(void *arg)
     TickType_t wake = xTaskGetTickCount();
     uint64_t count_window = esp_timer_get_time();
     uint32_t count = 0;
-    unsigned consecutive_errors = 0;
+    // unsigned consecutive_errors = 0;
 #if CONFIG_IMU_RAW_ENABLED
-    uint64_t raw_due_us = count_window;
+    // uint64_t raw_due_us = count_window;
     uint32_t raw_count = 0;
 #endif
 
     while (s_running) {
         system_state_t st;
         system_state_snapshot(&st);
-        // uint32_t rate = st.requested_rate_hz ? st.requested_rate_hz : 1;
-        // TickType_t period = pdMS_TO_TICKS(1000 / rate);
+        uint32_t rate = st.requested_rate_hz ? st.requested_rate_hz : 1;
+        TickType_t period = pdMS_TO_TICKS(1000 / rate);
         //PATCH2
-        const uint32_t fifo_poll_rate = CONFIG_IMU_FIFO_POLL_RATE_HZ;
-        TickType_t period = pdMS_TO_TICKS(1000U / fifo_poll_rate);
+        // const uint32_t fifo_poll_rate = CONFIG_IMU_FIFO_POLL_RATE_HZ;
+        // TickType_t period = pdMS_TO_TICKS(1000U / fifo_poll_rate);
         if (!period) period = 1;
 
-        bool valid = false;
+        // bool valid = false;
         
 #if CONFIG_IMU_DMP_ENABLED
         // imu_sample_t sample = {

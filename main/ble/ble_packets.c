@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <string.h>
 
+#include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -86,15 +87,36 @@ static uint8_t clamp_u8(uint32_t value)
 //     put_u32_le(out + 24, (uint32_t)sample->q3_q30);
 // }
 
-// void ble_encode_aux(uint8_t out[APP_AUX_PACKET_SIZE],
-//                     uint32_t ts, uint8_t mask, const int16_t values[8])
-// {
-//     out[0] = 1;
-//     out[1] = mask;
-//     put_u32_le(out + 2, ts);
-//     for (int i = 0; i < 8; ++i) put_i16_le(out + 6 + i * 2, values[i]);
-// }
+void ble_encode_aux(uint8_t out[AUX_PACKET_V1_SIZE],
+                    uint32_t ts, uint8_t sequence, const int16_t values[8])
+{
+    out[0] = AUX_PACKET_VERSION;
+    out[1] = sequence;
+    put_u32_le(out + 2, ts);
+    for (int i = 0; i < 8; ++i) put_i16_le(out + 6 + i * 2, values[i]);
+}
 
+size_t ble_encode_aux_for_mtu(
+    uint8_t *out, 
+    size_t capacity, 
+    uint16_t mtu,
+    const adc_sample_t *sample)
+{
+    if (!out || !sample || mtu < 23) {
+        ESP_LOGE("BLE PACKET", "Invalid parameters for aux packet encoding");
+        return 0;
+    }
+
+    const size_t att_payload = (size_t)mtu - 3U;
+
+    if (att_payload >= AUX_PACKET_V1_SIZE &&
+        capacity >= AUX_PACKET_V1_SIZE) {
+        ble_encode_aux(out, sample->timestamp_ms, sample->sequence, sample->values);
+        return AUX_PACKET_V1_SIZE;
+    }
+    ESP_LOGW("BLE PACKET", "MTU too small for aux packet: mtu=%u, att_payload=%zu, capacity=%zu", mtu, att_payload, capacity);
+    return 0;
+}
 // void ble_encode_imu_compact(
 //     uint8_t out[IMU_PACKET_COMPACT_SIZE],
 //     const imu_sample_t *sample,

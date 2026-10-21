@@ -17,6 +17,7 @@ esp_err_t system_state_init(void)
     s_state.boot_time_us = esp_timer_get_time();
     s_state.requested_rate_hz = CONFIG_IMU_RAW_RATE_HZ; //modded
     s_state.status_period_ms = CONFIG_BATTERY_STATUS_PERIOD_MS;
+    s_state.requested_adc_rate_hz = CONFIG_ADC_RATE_HZ;
     s_state.conn_handle = UINT16_MAX;
     s_state.mtu = 23;
     s_state.phy = 0;

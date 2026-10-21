@@ -8,6 +8,7 @@
 #include "system_state.h"
 #include "board/board_config.h"
 #include "imu/imu_manager.h"
+#include "adc/adc_manager.h"
 #include "battery/battery_manager.h"
 #include "button/button_manager.h"
 #include "led/led_manager.h"
@@ -130,7 +131,8 @@ void app_main(void)
 #endif
     }
     ESP_ERROR_CHECK(imu_manager_start());
-
+    ESP_ERROR_CHECK(adc_manager_init());
+    ESP_ERROR_CHECK(adc_manager_start());
     ESP_ERROR_CHECK(ble_manager_init());
     ESP_ERROR_CHECK(ble_manager_start());
     ESP_ERROR_CHECK(button_manager_start());

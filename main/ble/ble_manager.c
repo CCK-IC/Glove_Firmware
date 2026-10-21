@@ -17,6 +17,7 @@
 #include "app_config.h"
 #include "system_state.h"
 #include "imu/imu_manager.h"
+#include "adc/adc_manager.h"
 #include "ble_packets.h"
 #include "ble_uuid.h"
 #include "gatt_server.h"
@@ -379,6 +380,7 @@ static void notify_task(void *arg)
     uint32_t sent_in_window = 0;
     uint32_t last_imu_sequence = UINT32_MAX;
     uint32_t last_raw_sequence = UINT32_MAX;
+    uint32_t last_adc_sequence = UINT32_MAX;
     uint8_t last_battery = UINT8_MAX;
 
     while (true) {
@@ -460,7 +462,44 @@ static void notify_task(void *arg)
         //         }
 
         }
+#if CONFIG_AUX_ADC_ENABLED
+        if (s_streaming &&
+            state.ble_connected &&
+            gatt_aux_subscribed()) {
+            adc_sample_t adc_sample;
+            if ( adc_manager_latest(&adc_sample) && adc_sample.sequence != last_adc_sequence) {
+                uint8_t packet[AUX_PACKET_V1_SIZE];
+                size_t length = ble_encode_aux_for_mtu(
+                    packet,
+                    sizeof(packet),
+                    state.mtu,
+                    &adc_sample);
 
+                if (length == 0) {
+                    state.dropped_notifications++;
+                    system_state_replace(&state);
+                    last_adc_sequence = adc_sample.sequence;
+                } else {
+                    int rc = notify(
+                        gatt_aux_handle,
+                        packet,
+                        (uint16_t)length);
+
+                    if (rc != 0) {
+                        state.dropped_notifications++;
+                        // TEST 
+                        ESP_LOGW(TAG, "notify aux failed rc=%d", rc);
+                        system_state_replace(&state);
+                    }
+                    /*
+                     * Consume each raw sample once. Notification errors are
+                     * recoverable and do not terminate the connection.
+                     */
+                    last_adc_sequence = adc_sample.sequence;
+                }
+            }
+        }
+#endif
 #if CONFIG_IMU_RAW_ENABLED
         if (s_streaming &&
             state.ble_connected &&

@@ -9,5 +9,4 @@
 
 // #define APP_IMU_PACKET_SIZE  28
 #define APP_IMU_RAW_PACKET_SIZE 36
-#define APP_AUX_PACKET_SIZE  22
 #define APP_STATUS_SIZE      64

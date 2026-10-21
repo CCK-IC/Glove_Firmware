@@ -19,6 +19,8 @@ typedef struct {
     uint32_t actual_dmp_sample_rate_hz;
     uint32_t actual_notify_rate_hz;
     uint32_t actual_raw_sample_rate_hz;
+    uint32_t requested_adc_rate_hz;
+    uint32_t actual_adc_sample_rate_hz;
     uint32_t status_period_ms;
 
     uint32_t battery_mv;
@@ -49,6 +51,7 @@ typedef struct {
     uint32_t imu_reinitializations;
     uint32_t raw_sample_count;
     uint32_t dropped_raw_samples;
+    uint32_t adc_sample_count;
 
     int32_t last_error;
     char last_error_module[12];

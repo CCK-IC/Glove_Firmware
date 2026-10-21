@@ -31,6 +31,7 @@ enum {
     IMU_RAW_PACKET_VERSION_COMPACT = 2,
     STATUS_PACKET_VERSION_FULL = 1,
     STATUS_PACKET_VERSION_COMPACT = 2,
+    AUX_PACKET_VERSION = 1,
 };
 
 // #define IMU_PACKET_Q30_SIZE       28U
@@ -39,6 +40,7 @@ enum {
 #define IMU_RAW_COMPACT_V2_SIZE   20U
 #define STATUS_PACKET_FULL_SIZE   64U
 #define STATUS_PACKET_COMPACT_SIZE 20U
+#define AUX_PACKET_V1_SIZE 20U
 
 
 // typedef struct {
@@ -77,11 +79,30 @@ typedef struct {
     uint8_t gyro_range_code;
 } imu_raw_sample_t;
 
+typedef struct {
+    uint32_t sequence;
+    uint32_t timestamp_ms;
+    int16_t values[8];
+    // int16_t adc1;
+    // int16_t adc2;
+    // int16_t adc3;
+    // int16_t adc4;
+    // int16_t adc5;
+    // int16_t adc6;
+    // int16_t adc7;
+    // int16_t adc8;
+} adc_sample_t;
+
 // // void ble_encode_imu(uint8_t out[APP_IMU_PACKET_SIZE],
 // //                     const imu_sample_t *sample);
-// void ble_encode_aux(uint8_t out[APP_AUX_PACKET_SIZE],
-//                     uint32_t timestamp_ms, uint8_t valid_mask,
-//                     const int16_t values[8]);
+size_t ble_encode_aux_for_mtu(uint8_t *out, 
+    size_t capacity, 
+    uint16_t mtu,
+    const adc_sample_t *sample);
+
+void ble_encode_aux(uint8_t out[AUX_PACKET_V1_SIZE],
+    uint32_t timestamp_ms, uint8_t sequence,
+    const int16_t values[8]);
 void ble_encode_status(uint8_t out[APP_STATUS_SIZE]);
 
 // void ble_encode_imu_q30(

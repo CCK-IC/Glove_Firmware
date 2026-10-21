@@ -23,8 +23,8 @@ static void task_main(void *arg)
         system_state_snapshot(&s);
         ESP_LOGI(TAG,
             "board=%s idf=%s ble=%d mtu=%u imu=%u dmp=%d "
-            "rate=%lu/%lu raw=%lu notify=%lu bat=%lumV/%u%% "
-            "samples=%lu raw_samples=%lu drop=%lu raw_drop=%lu "
+            "rate=%lu/%lu raw=%lu notify=%lu adc=%lu bat=%lumV/%u%% "
+            "samples=%lu raw_samples=%lu adc_samples=%lu drop=%lu raw_drop=%lu "
             "i2c=%lu fifo=%lu heap=%lu led=%d",
             board_name(), esp_get_idf_version(), s.ble_connected, s.mtu,
             s.imu_state, s.imu_dmp,
@@ -32,9 +32,11 @@ static void task_main(void *arg)
             (unsigned long)s.actual_dmp_sample_rate_hz,
             (unsigned long)s.actual_raw_sample_rate_hz,
             (unsigned long)s.actual_notify_rate_hz,
+            (unsigned long)s.actual_adc_sample_rate_hz,
             (unsigned long)s.battery_mv, s.battery_percent,
             (unsigned long)s.sample_count,
             (unsigned long)s.raw_sample_count,
+            (unsigned long)s.adc_sample_count,
             (unsigned long)s.dropped_notifications,
             (unsigned long)s.dropped_raw_samples,
             (unsigned long)s.i2c_errors,
