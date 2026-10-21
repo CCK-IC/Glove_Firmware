@@ -1,0 +1,74 @@
+[
+    {
+        "type": "Group",
+        "name": "BLE",
+        "parent_id": null,
+        "workspaceRoot": null,
+        "workspacePath": null,
+        "id": "SfXismHTZcp5glOP",
+        "iconColor": "rgb(0, 0, 255)"
+    },
+    {
+        "type": "File",
+        "name": "c:\\Users\\ckchow\\Desktop\\Glove_Firmware\\main\\ble\\ble_manager.c",
+        "parent_id": "SfXismHTZcp5glOP",
+        "fsPath": "c:\\Users\\ckchow\\Desktop\\Glove_Firmware\\main\\ble\\ble_manager.c",
+        "workspaceRoot": null,
+        "workspacePath": null,
+        "id": "5GiWqf9tXbvBTgP8"
+    },
+    {
+        "type": "File",
+        "name": "c:\\Users\\ckchow\\Desktop\\Glove_Firmware\\main\\ble\\ble_manager.h",
+        "parent_id": "SfXismHTZcp5glOP",
+        "fsPath": "c:\\Users\\ckchow\\Desktop\\Glove_Firmware\\main\\ble\\ble_manager.h",
+        "workspaceRoot": null,
+        "workspacePath": null,
+        "id": "ATvK2HUjLilkxsBo"
+    },
+    {
+        "type": "File",
+        "name": "c:\\Users\\ckchow\\Desktop\\Glove_Firmware\\main\\ble\\ble_packets.c",
+        "parent_id": "SfXismHTZcp5glOP",
+        "fsPath": "c:\\Users\\ckchow\\Desktop\\Glove_Firmware\\main\\ble\\ble_packets.c",
+        "workspaceRoot": null,
+        "workspacePath": null,
+        "id": "8BmlTeCzDvUbq4oi"
+    },
+    {
+        "type": "File",
+        "name": "c:\\Users\\ckchow\\Desktop\\Glove_Firmware\\main\\ble\\ble_packets.h",
+        "parent_id": "SfXismHTZcp5glOP",
+        "fsPath": "c:\\Users\\ckchow\\Desktop\\Glove_Firmware\\main\\ble\\ble_packets.h",
+        "workspaceRoot": null,
+        "workspacePath": null,
+        "id": "zFhP3w09pxCK6ouv"
+    },
+    {
+        "type": "File",
+        "name": "c:\\Users\\ckchow\\Desktop\\Glove_Firmware\\main\\ble\\ble_uuid.h",
+        "parent_id": "SfXismHTZcp5glOP",
+        "fsPath": "c:\\Users\\ckchow\\Desktop\\Glove_Firmware\\main\\ble\\ble_uuid.h",
+        "workspaceRoot": null,
+        "workspacePath": null,
+        "id": "vDLjU7JdB5uPHr0N"
+    },
+    {
+        "type": "File",
+        "name": "c:\\Users\\ckchow\\Desktop\\Glove_Firmware\\main\\ble\\gatt_server.c",
+        "parent_id": "SfXismHTZcp5glOP",
+        "fsPath": "c:\\Users\\ckchow\\Desktop\\Glove_Firmware\\main\\ble\\gatt_server.c",
+        "workspaceRoot": null,
+        "workspacePath": null,
+        "id": "6mw03hTrzcZ2xDMl"
+    },
+    {
+        "type": "File",
+        "name": "c:\\Users\\ckchow\\Desktop\\Glove_Firmware\\main\\ble\\gatt_server.h",
+        "parent_id": "SfXismHTZcp5glOP",
+        "fsPath": "c:\\Users\\ckchow\\Desktop\\Glove_Firmware\\main\\ble\\gatt_server.h",
+        "workspaceRoot": null,
+        "workspacePath": null,
+        "id": "FNA0Lh6EYDdzet1m"
+    }
+]

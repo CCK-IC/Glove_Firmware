@@ -53,7 +53,9 @@ void power_off_sequence(uint8_t reason)
 
     ble_manager_stop_notifications();
     imu_manager_stop();
+#if CONFIG_IMU_ENABLED
     imu_manager_sleep();
+#endif
 
     /* Add NVS commit/close here when persistent application settings exist. */
 

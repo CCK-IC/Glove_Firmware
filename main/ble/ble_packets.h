@@ -5,13 +5,13 @@
 #include <stdint.h>
 #include "app_config.h"
 
-// enum {
-//     IMU_FLAG_VALID      = 1U << 0,
-//     IMU_FLAG_DMP        = 1U << 1,
-//     IMU_FLAG_SYNTHETIC  = 1U << 2,
-//     IMU_FLAG_FIFO_RESET = 1U << 3,
-//     IMU_FLAG_DEGRADED   = 1U << 4,
-// };
+enum {
+    IMU_FLAG_VALID      = 1U << 0,
+    IMU_FLAG_DMP        = 1U << 1,
+    IMU_FLAG_SYNTHETIC  = 1U << 2,
+    IMU_FLAG_FIFO_RESET = 1U << 3,
+    IMU_FLAG_DEGRADED   = 1U << 4,
+};
 
 enum {
     IMU_RAW_FLAG_VALID          = 1U << 0,
@@ -43,16 +43,16 @@ enum {
 #define AUX_PACKET_V1_SIZE 20U
 
 
-// typedef struct {
-//     uint32_t sequence;
-//     uint32_t timestamp_ms;
-//     int32_t q0_q30;
-//     int32_t q1_q30;
-//     int32_t q2_q30;
-//     int32_t q3_q30;
-//     uint16_t accuracy;
-//     uint8_t flags;
-// } imu_sample_t;
+typedef struct {
+    uint32_t sequence;
+    uint32_t timestamp_ms;
+    int32_t q0_q30;
+    int32_t q1_q30;
+    int32_t q2_q30;
+    int32_t q3_q30;
+    uint16_t accuracy;
+    uint8_t flags;
+} imu_dmp_sample_t;
 
 typedef struct {
     uint32_t sequence;

@@ -443,53 +443,78 @@ mainmenu "Project configuration"
     endmenu
 
     menu "ICM-20948 Configuration"
-
+        config IMU_ENABLED
+            bool "Enable ICM-20948 IMU"
+            default y
         config IMU_I2C_ADDRESS
             hex "ICM-20948 I2C address"
+            depends on IMU_ENABLED
             range 0x68 0x69
             default 0x68
 
-        config IMU_DMP_RATE_HZ
-            int "Normal acquisition/notification rate"
-            range 1 200
-            default 100
-
         config IMU_SLOW_RATE_HZ
             int "Slow/debug rate"
+            depends on IMU_ENABLED
             range 1 100
             default 25
 
         config IMU_I2C_RETRIES
             int "I2C transaction retries"
+            depends on IMU_ENABLED
             range 1 10
             default 3
 
         config IMU_ERROR_REINIT_COUNT
             int "Errors before FIFO recovery"
+            depends on IMU_ENABLED
             range 1 100
             default 5
 
         config IMU_DMP_ENABLED
             bool "Enable managed-component DMP integration"
+            depends on IMU_ENABLED
             default n
             help
                 Requires the managed component's legal DMP image and API.
                 Also enable CONFIG_ICM_20948_USE_DMP in the component menu.
+        
+        config IMU_DMP_DUMMY
+            bool "Output generated DMP data in fetching stage by skipping actual sensor reading"
+            default n
+            help
+                For development and testing, this option generates dummy quaternion values
+                instead of reading the actual sensor. The values are a sawtooth waveform
+                that cycles from -1.0 to 1.0 over 10 seconds.
+        config IMU_DMP_RATE_HZ
+            int "Normal acquisition/notification rate"
+            depends on IMU_DMP_ENABLED || IMU_DMP_DUMMY
+            range 1 200
+            default 100
 
         config IMU_SYNTHETIC_FALLBACK
             bool "Use marked synthetic quaternion if DMP data is unavailable"
+            depends on IMU_DMP_ENABLED
             default n
 
         config IMU_RAW_ENABLED
             bool "Enable raw accelerometer, gyroscope, magnetometer and temperature data"
+            depends on IMU_ENABLED
             default y
             help
                 Reads native AGMT data from the ICM-20948 in the existing IMU
                 acquisition task and exposes it through UUID_IMU_RAW.
+        
+        config IMU_RAW_DUMMY
+            bool "Output generated raw data in fetching stage by skipping actual sensor reading"
+            default n
+            help
+                For development and testing, this option generates dummy AGMT values
+                instead of reading the actual sensor. The values are a sawtooth waveform
+                that cycles from -32768 to 32767 over 10 seconds.
 
         config IMU_RAW_RATE_HZ
             int "Raw sensor acquisition rate"
-            depends on IMU_RAW_ENABLED
+            depends on IMU_RAW_ENABLED || IMU_RAW_DUMMY
             range 1 200
             default 100
             help
@@ -498,7 +523,7 @@ mainmenu "Project configuration"
 
         config IMU_RAW_DMP_ACCEL_RANGE_CODE
             int "DMP profile accelerometer range code"
-            depends on IMU_RAW_ENABLED && IMU_DMP_ENABLED
+            depends on IMU_RAW_ENABLED || IMU_DMP_ENABLED || IMU_RAW_DUMMY || IMU_DMP_DUMMY
             range 0 3
             default 1
             help
@@ -508,7 +533,7 @@ mainmenu "Project configuration"
 
         config IMU_RAW_DMP_GYRO_RANGE_CODE
             int "DMP profile gyroscope range code"
-            depends on IMU_RAW_ENABLED && IMU_DMP_ENABLED
+            depends on IMU_RAW_ENABLED || IMU_DMP_ENABLED || IMU_RAW_DUMMY || IMU_DMP_DUMMY
             range 0 3
             default 3
             help

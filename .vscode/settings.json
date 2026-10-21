@@ -10,9 +10,9 @@
     "clangd.arguments": [
       "--background-index",
       "--query-driver=**",
-      "--compile-commands-dir=c:\\Users\\ckchow\\Desktop\\i2c_dmp_quat9_orientation\\build"
+      "--compile-commands-dir=${config:idf.buildPath}/build"
     ],
     "idf.flashType": "JTAG",
     "idf.port": "COM4",
-    "C_Cpp.default.compilerPath": "c:/Users/ckchow/Desktop/i2c_dmp_quat9_orientation/build/compile_commands.json"
+    "C_Cpp.default.compilerPath": "${config:idf.buildPath}/compile_commands.json"
 }

@@ -5,7 +5,6 @@
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-// #include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -16,74 +15,25 @@
 #include "icm20948_i2c.h"
 
 static const char *TAG = "imu";
-// static i2c_master_dev_handle_t s_i2c_dev;
 static icm20948_device_t s_icm;
 static icm0948_config_i2c_t icm_config;
-// static icm20948_serif_t s_serif;
 static SemaphoreHandle_t s_sample_lock;
 static SemaphoreHandle_t s_raw_sample_lock;
-// static imu_sample_t s_latest;
 static imu_raw_sample_t s_latest_raw;
 static TaskHandle_t s_task;
 static volatile bool s_running;
 static bool s_sensor_ok;
-// static uint32_t s_sequence;
+static uint32_t s_sequence;
 static uint32_t s_raw_sequence;
 static uint8_t s_accel_range_code;
 static uint8_t s_gyro_range_code;
 
-
-// static icm20948_status_e serif_write(uint8_t reg, uint8_t *data,
-//                                      uint32_t len, void *user)
-// {
-//     (void)user;
-//     if (len > 32) return ICM_20948_STAT_PARAM_ERR;
-//     uint8_t buffer[33];
-//     buffer[0] = reg;
-//     memcpy(buffer + 1, data, len);
-//     for (int attempt = 0; attempt < CONFIG_IMU_I2C_RETRIES; ++attempt) {
-//         if (i2c_master_transmit(s_i2c_dev, buffer, len + 1, 50) == ESP_OK){
-//             system_state_t st;
-//             system_state_snapshot(&st);
-//             if (st.i2c_errors >= 8) st.i2c_errors-=8;
-//             system_state_replace(&st);
-//             return ICM_20948_STAT_OK;
-//         }
-//     }
-//     system_state_t st;
-//     system_state_snapshot(&st);
-//     st.i2c_errors+=8;
-//     system_state_replace(&st);
-//     return ICM_20948_STAT_ERR;
-// }
-
-// static icm20948_status_e serif_read(uint8_t reg, uint8_t *data,
-//                                     uint32_t len, void *user)
-// {
-//     (void)user;
-//     for (int attempt = 0; attempt < CONFIG_IMU_I2C_RETRIES; ++attempt) {
-//         if (i2c_master_transmit_receive(s_i2c_dev, &reg, 1,
-//                                         data, len, 50) == ESP_OK){
-//                                             system_state_t st;
-//                                             system_state_snapshot(&st);
-//                                             if (st.i2c_errors >= 5) st.i2c_errors-=5;
-//                                             system_state_replace(&st);
-//                                             return ICM_20948_STAT_OK;
-//                                         }
-//     }
-//     system_state_t st;
-//     system_state_snapshot(&st);
-//     st.i2c_errors+=5;
-//     system_state_replace(&st);
-//     return ICM_20948_STAT_ERR;
-// }
-
-// static int32_t q30(double v)
-// {
-//     if (v > 1.0) v = 1.0;
-//     if (v < -1.0) v = -1.0;
-//     return (int32_t)llround(v * 1073741824.0);
-// }
+static int32_t q30(double v)
+{
+    if (v > 1.0) v = 1.0;
+    if (v < -1.0) v = -1.0;
+    return (int32_t)llround(v * 1073741824.0);
+}
 
 // static void publish(const imu_sample_t *sample)
 // {
@@ -110,20 +60,21 @@ static void publish_raw(const imu_raw_sample_t *sample)
 }
 
 
-// static void synthetic_sample(imu_sample_t *out)
-// {
-//     const double angle = (double)(s_sequence % 1000) *
-//                          (2.0 * M_PI / 1000.0);
-//     out->q0_q30 = q30(cos(angle * 0.5));
-//     out->q1_q30 = 0;
-//     out->q2_q30 = 0;
-//     out->q3_q30 = q30(sin(angle * 0.5));
-//     out->accuracy = 0;
-//     out->flags = IMU_FLAG_VALID | IMU_FLAG_SYNTHETIC;
-// }
+static void synthetic_sample(imu_dmp_sample_t *out)
+{
+    const double angle = (double)(s_sequence % 1000) *
+                         (2.0 * M_PI / 1000.0);
+    out->q0_q30 = q30(cos(angle * 0.5));
+    out->q1_q30 = 0;
+    out->q2_q30 = 0;
+    out->q3_q30 = q30(sin(angle * 0.5));
+    out->accuracy = 0;
+    out->flags = IMU_FLAG_VALID | IMU_FLAG_SYNTHETIC;
+}
 
 static esp_err_t configure_sensor(void)
 {
+#if CONFIG_IMU_ENABLED
     i2c_device_config_t cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = CONFIG_IMU_I2C_ADDRESS,
@@ -133,11 +84,6 @@ static esp_err_t configure_sensor(void)
                                                &cfg, &icm_config.dev_handle);
     if (err != ESP_OK) return err;
 
-    // icm20948_init_struct(&s_icm);
-    // // s_serif.write = serif_write;
-    // // s_serif.read = serif_read;
-    // // s_serif.user = NULL;
-    // icm20948_link_serif(&s_icm, &s_serif);
     icm20948_init_i2c(&s_icm, &icm_config);
 
 #if CONFIG_IMU_DMP_ENABLED
@@ -212,7 +158,12 @@ static esp_err_t configure_sensor(void)
 		ESP_LOGE(TAG, "magnetometer configuration failed");
 		return ESP_ERR_NOT_FOUND;
 	}
+#endif
 
+#if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_DMP_ENABLED
+    s_accel_range_code = CONFIG_IMU_RAW_DMP_ACCEL_RANGE_CODE;
+    s_gyro_range_code = CONFIG_IMU_RAW_DMP_GYRO_RANGE_CODE;
+#endif
 
 #if CONFIG_IMU_DMP_ENABLED
     icm20948_status_e rc = icm20948_init_dmp_sensor_with_defaults(&s_icm); //TOBE overided
@@ -220,8 +171,6 @@ static esp_err_t configure_sensor(void)
         ESP_LOGE(TAG, "DMP defaults failed: %d", rc);
         return ESP_FAIL;
     }
-    s_accel_range_code = CONFIG_IMU_RAW_DMP_ACCEL_RANGE_CODE;
-    s_gyro_range_code = CONFIG_IMU_RAW_DMP_GYRO_RANGE_CODE;
 
     //PATCH2
     system_state_snapshot(&st);
@@ -285,7 +234,7 @@ static void task_main(void *arg)
         // TickType_t period = pdMS_TO_TICKS(1000U / fifo_poll_rate);
         if (!period) period = 1;
 
-        // bool valid = false;
+        bool valid = false;
         
 #if CONFIG_IMU_DMP_ENABLED
         // imu_sample_t sample = {
@@ -394,10 +343,10 @@ static void task_main(void *arg)
 
 #if CONFIG_IMU_SYNTHETIC_FALLBACK
         if (!s_sensor_ok) {
-            // synthetic_sample(&sample);
-            // valid = true;
+            synthetic_sample(&sample);
+            valid = true;
         }
-#else
+#elif CONFIG_IMU_DMP_ENABLED
         if (!s_sensor_ok || !valid) {
             imu_manager_fifo_reinitialize();
         }
@@ -414,7 +363,7 @@ static void task_main(void *arg)
         }
 #endif
 
-#if CONFIG_IMU_RAW_ENABLED
+#if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
         uint64_t raw_now_us = esp_timer_get_time();
         if (s_sensor_ok /* && raw_now_us >= raw_due_us */) {
             // remove the raw sample rate limit for now, since we are not using it
@@ -423,6 +372,7 @@ static void task_main(void *arg)
             // raw_due_us = raw_now_us + 1000000ULL / raw_rate;
 
             icm20948_agmt_t agmt = {0};
+#ifndef CONFIG_IMU_RAW_DUMMY
             if (icm20948_get_agmt(&s_icm, &agmt) ==
                 ICM_20948_STAT_OK) {
                 imu_raw_sample_t raw = {
@@ -454,6 +404,34 @@ static void task_main(void *arg)
                 if (st.imu_dmp) {
                     raw.flags |= IMU_RAW_FLAG_DMP_CONCURRENT;
                 }
+#else
+
+                imu_raw_sample_t raw = {
+                    .sequence = ++s_raw_sequence,
+                    .timestamp_ms =
+                        (uint32_t)(raw_now_us / 1000ULL),
+                    .accel_x = (int16_t)((s_raw_sequence % 65536) - 32768),
+                    .accel_y = (int16_t)((s_raw_sequence % 65536) - 32768),
+                    .accel_z = (int16_t)((s_raw_sequence % 65536) - 32768),
+                    .gyro_x = (int16_t)((s_raw_sequence % 65536) - 32768),
+                    .gyro_y = (int16_t)((s_raw_sequence % 65536) - 32768),
+                    .gyro_z = (int16_t)((s_raw_sequence % 65536) - 32768),
+                    .mag_x = (int16_t)((s_raw_sequence % 65536) - 32768),
+                    .mag_y = (int16_t)((s_raw_sequence % 65536) - 32768),
+                    .mag_z = (int16_t)((s_raw_sequence % 65536) - 32768),
+                    .temperature = (int16_t)((s_raw_sequence % 65536) - 32768),
+                    .actual_rate_hz =
+                        (uint16_t)st.actual_raw_sample_rate_hz,
+                    .flags =
+                        IMU_RAW_FLAG_VALID |
+                        IMU_RAW_FLAG_ACCEL_VALID |
+                        IMU_RAW_FLAG_GYRO_VALID |
+                        IMU_RAW_FLAG_MAG_VALID |
+                        IMU_RAW_FLAG_TEMP_VALID,
+                    .accel_range_code = s_accel_range_code,
+                    .gyro_range_code = s_gyro_range_code,
+                };
+#endif
 
                 publish_raw(&raw);
                 raw_count++;
