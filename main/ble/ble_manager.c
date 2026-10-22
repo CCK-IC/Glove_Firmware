@@ -398,109 +398,71 @@ static void notify_task(void *arg)
         if (period == 0) {
             period = 1;
         }
-
+#if CONFIG_IMU_DMP_ENABLED
         if (s_streaming &&
             state.ble_connected //&&
             ) {
-        //         if (gatt_imu_raw_subscribed()){
+                if (gatt_imu_raw_subscribed()){
 
-        //         }
-        //         if (gatt_imu_subscribed()){                    
-        //             imu_sample_t sample;
-        
-        //             if (imu_manager_latest(&sample)) {
-        //                 bool is_new =
-        //                     sample.sequence != last_imu_sequence;
-        
-        // #if CONFIG_IMU_NOTIFY_DUPLICATE_SAMPLES
-        //                 is_new = true;
-        // #endif
-        
-        //                 if (is_new) {
-        //                     uint8_t packet[IMU_PACKET_Q30_SIZE];
-        
-        //                     size_t length = ble_encode_imu_for_mtu(
-        //                         packet,
-        //                         sizeof(packet),
-        //                         state.mtu,
-        //                         &sample);
-        
-        //                     if (length == 0) {
-        //                         /*
-        //                          * No compatible packet fits. Count once per new
-        //                          * sample rather than continuously retrying it.
-        //                          */
-        //                         state.dropped_notifications++;
-        //                         system_state_replace(&state);
-        //                         last_imu_sequence = sample.sequence;
-        //                     } else {
-        //                         int rc = notify(
-        //                             gatt_imu_handle,
-        //                             packet,
-        //                             (uint16_t)length);
-        
-        //                         if (rc == 0) {
-        //                             sent_in_window++;
-        //                             last_imu_sequence = sample.sequence;
-        //                         } else {
-        //                             /*
-        //                              * Notification failure is recoverable. Do not
-        //                              * disconnect the peer.
-        //                              */
-        //                             state.dropped_notifications++;
-        //                             system_state_replace(&state);
-        
-        //                             /*
-        //                              * Mark this sample consumed for deterministic
-        //                              * behavior. A later sample will be attempted.
-        //                              */
-        //                             last_imu_sequence = sample.sequence;
-        //                         }
-        //                     }
-        //                 }
-        //             }
-        //         }
-
-        }
-#if CONFIG_AUX_ADC_ENABLED
-        if (s_streaming &&
-            state.ble_connected &&
-            gatt_aux_subscribed()) {
-            adc_sample_t adc_sample;
-            if ( adc_manager_latest(&adc_sample) && adc_sample.sequence != last_adc_sequence) {
-                uint8_t packet[AUX_PACKET_V1_SIZE];
-                size_t length = ble_encode_aux_for_mtu(
-                    packet,
-                    sizeof(packet),
-                    state.mtu,
-                    &adc_sample);
-
-                if (length == 0) {
-                    state.dropped_notifications++;
-                    system_state_replace(&state);
-                    last_adc_sequence = adc_sample.sequence;
-                } else {
-                    int rc = notify(
-                        gatt_aux_handle,
-                        packet,
-                        (uint16_t)length);
-
-                    if (rc != 0) {
-                        state.dropped_notifications++;
-                        // TEST 
-                        ESP_LOGW(TAG, "notify aux failed rc=%d", rc);
-                        system_state_replace(&state);
-                    }
-                    /*
-                     * Consume each raw sample once. Notification errors are
-                     * recoverable and do not terminate the connection.
-                     */
-                    last_adc_sequence = adc_sample.sequence;
                 }
-            }
+                if (gatt_imu_subscribed()){                    
+                    imu_sample_t sample;
+        
+                    if (imu_manager_latest(&sample)) {
+                        bool is_new =
+                            sample.sequence != last_imu_sequence;
+        
+        #if CONFIG_IMU_NOTIFY_DUPLICATE_SAMPLES
+                        is_new = true;
+        #endif
+        
+                        if (is_new) {
+                            uint8_t packet[IMU_PACKET_Q30_SIZE];
+        
+                            size_t length = ble_encode_imu_for_mtu(
+                                packet,
+                                sizeof(packet),
+                                state.mtu,
+                                &sample);
+        
+                            if (length == 0) {
+                                /*
+                                 * No compatible packet fits. Count once per new
+                                 * sample rather than continuously retrying it.
+                                 */
+                                state.dropped_notifications++;
+                                system_state_replace(&state);
+                                last_imu_sequence = sample.sequence;
+                            } else {
+                                int rc = notify(
+                                    gatt_imu_handle,
+                                    packet,
+                                    (uint16_t)length);
+        
+                                if (rc == 0) {
+                                    sent_in_window++;
+                                    last_imu_sequence = sample.sequence;
+                                } else {
+                                    /*
+                                     * Notification failure is recoverable. Do not
+                                     * disconnect the peer.
+                                     */
+                                    state.dropped_notifications++;
+                                    system_state_replace(&state);
+        
+                                    /*
+                                     * Mark this sample consumed for deterministic
+                                     * behavior. A later sample will be attempted.
+                                     */
+                                    last_imu_sequence = sample.sequence;
+                                }
+                            }
+                        }
+                    }
+                }
         }
 #endif
-#if CONFIG_IMU_RAW_ENABLED
+#if CONFIG_IMU_RAW_ENABLED || 1
         if (s_streaming &&
             state.ble_connected &&
             gatt_imu_raw_subscribed()) {
@@ -537,6 +499,46 @@ static void notify_task(void *arg)
                      * recoverable and do not terminate the connection.
                      */
                     last_raw_sequence = raw_sample.sequence;
+                }
+            }
+        }
+#elif CONFIG_IMU_RAW_DUMMMY
+
+#endif
+#if CONFIG_AUX_ADC_ENABLED
+        if (s_streaming &&
+            state.ble_connected &&
+            gatt_aux_subscribed()) {
+            adc_sample_t adc_sample;
+            if ( adc_manager_latest(&adc_sample) && adc_sample.sequence != last_adc_sequence) {
+                uint8_t packet[AUX_PACKET_V1_SIZE];
+                size_t length = ble_encode_aux_for_mtu(
+                    packet,
+                    sizeof(packet),
+                    state.mtu,
+                    &adc_sample);
+
+                if (length == 0) {
+                    state.dropped_notifications++;
+                    system_state_replace(&state);
+                    last_adc_sequence = adc_sample.sequence;
+                } else {
+                    int rc = notify(
+                        gatt_aux_handle,
+                        packet,
+                        (uint16_t)length);
+
+                    if (rc != 0) {
+                        state.dropped_notifications++;
+                        // TEST 
+                        ESP_LOGW(TAG, "notify aux failed rc=%d", rc);
+                        system_state_replace(&state);
+                    }
+                    /*
+                     * Consume each raw sample once. Notification errors are
+                     * recoverable and do not terminate the connection.
+                     */
+                    last_adc_sequence = adc_sample.sequence;
                 }
             }
         }

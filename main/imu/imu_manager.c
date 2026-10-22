@@ -219,7 +219,7 @@ static void task_main(void *arg)
     uint64_t count_window = esp_timer_get_time();
     uint32_t count = 0;
     // unsigned consecutive_errors = 0;
-#if CONFIG_IMU_RAW_ENABLED
+#if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
     // uint64_t raw_due_us = count_window;
     uint32_t raw_count = 0;
 #endif
@@ -404,34 +404,6 @@ static void task_main(void *arg)
                 if (st.imu_dmp) {
                     raw.flags |= IMU_RAW_FLAG_DMP_CONCURRENT;
                 }
-#else
-
-                imu_raw_sample_t raw = {
-                    .sequence = ++s_raw_sequence,
-                    .timestamp_ms =
-                        (uint32_t)(raw_now_us / 1000ULL),
-                    .accel_x = (int16_t)((s_raw_sequence % 65536) - 32768),
-                    .accel_y = (int16_t)((s_raw_sequence % 65536) - 32768),
-                    .accel_z = (int16_t)((s_raw_sequence % 65536) - 32768),
-                    .gyro_x = (int16_t)((s_raw_sequence % 65536) - 32768),
-                    .gyro_y = (int16_t)((s_raw_sequence % 65536) - 32768),
-                    .gyro_z = (int16_t)((s_raw_sequence % 65536) - 32768),
-                    .mag_x = (int16_t)((s_raw_sequence % 65536) - 32768),
-                    .mag_y = (int16_t)((s_raw_sequence % 65536) - 32768),
-                    .mag_z = (int16_t)((s_raw_sequence % 65536) - 32768),
-                    .temperature = (int16_t)((s_raw_sequence % 65536) - 32768),
-                    .actual_rate_hz =
-                        (uint16_t)st.actual_raw_sample_rate_hz,
-                    .flags =
-                        IMU_RAW_FLAG_VALID |
-                        IMU_RAW_FLAG_ACCEL_VALID |
-                        IMU_RAW_FLAG_GYRO_VALID |
-                        IMU_RAW_FLAG_MAG_VALID |
-                        IMU_RAW_FLAG_TEMP_VALID,
-                    .accel_range_code = s_accel_range_code,
-                    .gyro_range_code = s_gyro_range_code,
-                };
-#endif
 
                 publish_raw(&raw);
                 raw_count++;
@@ -440,7 +412,38 @@ static void task_main(void *arg)
                 st.dropped_raw_samples++;
                 system_state_replace(&st);
             }
+#else
         }
+
+        imu_raw_sample_t raw = {
+            .sequence = ++s_raw_sequence,
+            .timestamp_ms =
+                (uint32_t)(raw_now_us / 1000ULL),
+            .accel_x = (int16_t)((s_raw_sequence % 65536) - 32768),
+            .accel_y = (int16_t)((s_raw_sequence % 65536) - 32768),
+            .accel_z = (int16_t)((s_raw_sequence % 65536) - 32768),
+            .gyro_x = (int16_t)((s_raw_sequence % 65536) - 32768),
+            .gyro_y = (int16_t)((s_raw_sequence % 65536) - 32768),
+            .gyro_z = (int16_t)((s_raw_sequence % 65536) - 32768),
+            .mag_x = (int16_t)((s_raw_sequence % 65536) - 32768),
+            .mag_y = (int16_t)((s_raw_sequence % 65536) - 32768),
+            .mag_z = (int16_t)((s_raw_sequence % 65536) - 32768),
+            .temperature = (int16_t)((s_raw_sequence % 65536) - 32768),
+            .actual_rate_hz =
+                (uint16_t)st.actual_raw_sample_rate_hz,
+            .flags =
+                IMU_RAW_FLAG_VALID |
+                IMU_RAW_FLAG_ACCEL_VALID |
+                IMU_RAW_FLAG_GYRO_VALID |
+                IMU_RAW_FLAG_MAG_VALID |
+                IMU_RAW_FLAG_TEMP_VALID,
+            .accel_range_code = s_accel_range_code,
+            .gyro_range_code = s_gyro_range_code,
+        };
+        publish_raw(&raw);
+        raw_count++;
+#endif
+
 #endif
 
         const uint64_t now = esp_timer_get_time();
@@ -453,7 +456,7 @@ static void task_main(void *arg)
             st.actual_raw_sample_rate_hz = raw_count;
 #endif
             system_state_replace(&st);
-#if CONFIG_IMU_RAW_ENABLED
+#if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
             xSemaphoreTake(s_raw_sample_lock, portMAX_DELAY);
             s_latest_raw.actual_rate_hz = (uint16_t)raw_count;
             xSemaphoreGive(s_raw_sample_lock);

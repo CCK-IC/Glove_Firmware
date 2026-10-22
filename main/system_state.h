@@ -37,6 +37,10 @@ typedef struct {
     bool slow_mode;
     bool power_off_pending;
 
+    bool imu_dmp_subscribed;
+    bool imu_raw_subscribed;
+    bool aux_subscribed;
+
     uint16_t conn_handle;
     uint16_t mtu;
     uint8_t who_am_i;

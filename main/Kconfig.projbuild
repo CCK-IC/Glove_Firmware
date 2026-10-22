@@ -452,11 +452,6 @@ mainmenu "Project configuration"
             range 0x68 0x69
             default 0x68
 
-        config IMU_SLOW_RATE_HZ
-            int "Slow/debug rate"
-            depends on IMU_ENABLED
-            range 1 100
-            default 25
 
         config IMU_I2C_RETRIES
             int "I2C transaction retries"
@@ -541,7 +536,12 @@ mainmenu "Project configuration"
                 0 = +/-250dps, 1 = +/-500dps, 2 = +/-1000dps,
                 3 = +/-2000dps. This must match the selected managed or
                 application DMP profile.
-
+                
+        config IMU_SLOW_RATE_HZ
+            int "Slow/debug rate"
+            depends on IMU_ENABLED || IMU_RAW_DUMMY || IMU_DMP_DUMMY
+            range 1 100
+            default 25
     endmenu
 
     menu "ICM-20948 DMP Rate Policy"

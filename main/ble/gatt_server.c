@@ -304,7 +304,17 @@ void gatt_set_subscription(uint16_t attr, bool enabled)
 }
 
 // bool gatt_imu_subscribed(void) { return s_imu_notify; }
-bool gatt_imu_raw_subscribed(void) { return s_imu_raw_notify; }
-bool gatt_aux_subscribed(void) { return s_aux_notify; }
+bool gatt_imu_raw_subscribed(void) {
+    system_state_t st;
+    system_state_snapshot(&st);
+    st.imu_raw_subscribed = s_imu_raw_notify;
+    system_state_replace(&st);
+    return s_imu_raw_notify; }
+bool gatt_aux_subscribed(void) {
+    system_state_t st;
+    system_state_snapshot(&st);
+    st.aux_subscribed = s_aux_notify;
+    system_state_replace(&st);
+    return s_aux_notify; }
 bool gatt_status_subscribed(void) { return s_status_notify; }
 bool gatt_battery_subscribed(void) { return s_battery_notify; }
