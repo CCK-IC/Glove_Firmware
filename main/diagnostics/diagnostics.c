@@ -27,8 +27,7 @@ static void task_main(void *arg)
             "rate=%lu/%lu raw=%lu notify=%lu adc=%lu bat=%lumV/%u%% "
             "samples=%lu raw_samples=%lu adc_samples=%lu drop=%lu raw_drop=%lu "
             "i2c=%lu fifo=%lu heap=%lu led=%d",
-            board_name(), esp_get_idf_version(), s.ble_connected, s.mtu,
-            s.imu_state, s.imu_dmp,
+            board_name(), esp_get_idf_version(), s.ble_connected, s.mtu,s.imu_state, s.imu_dmp,
             s.imu_dmp_subscribed ? "T" : "F",
             s.imu_raw_subscribed ? "T" : "F",
             s.aux_subscribed ? "T" : "F",
@@ -64,3 +63,35 @@ esp_err_t diagnostics_start(void)
                        NULL, 2, NULL) == pdPASS
         ? ESP_OK : ESP_ERR_NO_MEM;
 }
+
+/* 
+DOC
+The values can be categorized in to System(``SYS``), Bluetooth(``BLE``),Sensor(``SEN``)
+|Type|fString|sVariable|Meaning|
+|:--:|--|--|-|
+| SYS | board | ``board_name()`` |Hardware Info|
+| SYS | idf | ``esp_get_idf_version()`` |Firmware Info|
+| BLE | ble | ``s.ble_connected`` | Bluetooth connected|
+| BLE | mtu | ``s.mtu`` | Handshaked Max packet size|
+| SEN | imu | ``s.imu_state`` | IMU state|
+| SEN | dmp | ``s.imu_dmp`` | DMP enabled|
+| BLE | dmp_notify | ``s.imu_dmp_subscribed`` | DMP notification subscribed|
+| BLE | raw_notify | ``s.imu_raw_subscribed`` | Raw notification subscribed|
+| BLE | aux_notify | ``s.aux_subscribed`` | Aux(ADC) notification subscribed|
+| BLE | rate | ``s.requested_rate_hz`` | Requested notification rate|
+| SEN | dmp | ``s.actual_dmp_sample_rate_hz`` | Actual DMP sample rate|
+| SEN | raw | ``s.actual_raw_sample_rate_hz`` | Actual Raw sample rate|
+| BLE | notify | ``s.actual_notify_rate_hz`` | Actual notification sample rate|
+| SEN | adc | ``s.actual_adc_sample_rate_hz`` | Actual ADC sample rate|
+| SYS | bat | ``s.battery_mv``, ``s.battery_percent`` | Battery voltage and level|
+| BLE | sample | ``s.sample_count`` | *th DMP sample sent|
+| BLE | raw_sample | ``s.raw_sample_count`` | *th Raw sample sent|
+| BLE | adc_sample | ``s.adc_sample_count`` | *th ADC sample sent|
+| BLE | drop | ``s.dropped_notifications`` | # of dropped DMP sample|
+| BLE | raw_drop | ``s.dropped_raw_samples`` | # of dropped Raw sample|
+| SEN | i2c | ``s.i2c_errors`` | IMU missed poll due to I2C error|
+| SEN | fifio | ``s.fifo_overflows`` | IMU missed poll due to FIFO error|
+| SYS | heap | ``esp_get_free_heap_size()`` | Memory blocks avaliable in ESP|
+| SYS | led | ``led_get_current_pattern()`` | External LED pattern|
+
+*/
