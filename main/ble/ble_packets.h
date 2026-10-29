@@ -25,8 +25,8 @@ enum {
 
 
 enum {
-    // IMU_PACKET_VERSION_Q30 = 1,
-    // IMU_PACKET_VERSION_Q14_COMPACT = 2,
+    IMU_PACKET_VERSION_Q30 = 1,
+    IMU_PACKET_VERSION_Q14_COMPACT = 2,
     IMU_RAW_PACKET_VERSION_FULL = 1,
     IMU_RAW_PACKET_VERSION_COMPACT = 2,
     STATUS_PACKET_VERSION_FULL = 1,
@@ -34,13 +34,13 @@ enum {
     AUX_PACKET_VERSION = 1,
 };
 
-// #define IMU_PACKET_Q30_SIZE       28U
-// #define IMU_PACKET_COMPACT_SIZE   20U
+#define IMU_PACKET_Q30_SIZE       28U
+#define IMU_PACKET_COMPACT_SIZE   20U
 #define IMU_RAW_FULL_V1_SIZE      36U
 #define IMU_RAW_COMPACT_V2_SIZE   20U
 #define STATUS_PACKET_FULL_SIZE   64U
 #define STATUS_PACKET_COMPACT_SIZE 20U
-#define AUX_PACKET_V1_SIZE 20U
+#define AUX_PACKET_V1_SIZE 22U
 
 
 typedef struct {
@@ -94,7 +94,7 @@ typedef struct {
 } adc_sample_t;
 
 // // void ble_encode_imu(uint8_t out[APP_IMU_PACKET_SIZE],
-// //                     const imu_sample_t *sample);
+// //                     const imu_dmp_sample_t *sample);
 size_t ble_encode_aux_for_mtu(uint8_t *out, 
     size_t capacity, 
     uint16_t mtu,
@@ -105,21 +105,21 @@ void ble_encode_aux(uint8_t out[AUX_PACKET_V1_SIZE],
     const int16_t values[8]);
 void ble_encode_status(uint8_t out[APP_STATUS_SIZE]);
 
-// void ble_encode_imu_q30(
-//     uint8_t out[IMU_PACKET_Q30_SIZE],
-//     const imu_sample_t *sample);
+void ble_encode_imu_q30(
+    uint8_t out[IMU_PACKET_Q30_SIZE],
+    const imu_dmp_sample_t *sample);
 
-// void ble_encode_imu_compact(
-//     uint8_t out[IMU_PACKET_COMPACT_SIZE],
-//     const imu_sample_t *sample,
-//     uint8_t requested_rate_hz,
-//     uint8_t actual_rate_hz);
+void ble_encode_imu_compact(
+    uint8_t out[IMU_PACKET_COMPACT_SIZE],
+    const imu_dmp_sample_t *sample,
+    uint8_t requested_rate_hz,
+    uint8_t actual_rate_hz);
 
-// size_t ble_encode_imu_for_mtu(
-//     uint8_t *out,
-//     size_t capacity,
-//     uint16_t mtu,
-//     const imu_sample_t *sample);
+size_t ble_encode_imu_for_mtu(
+    uint8_t *out,
+    size_t capacity,
+    uint16_t mtu,
+    const imu_dmp_sample_t *sample);
 
 void ble_encode_imu_raw_full(
     uint8_t out[IMU_RAW_FULL_V1_SIZE],

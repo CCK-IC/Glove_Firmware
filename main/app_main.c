@@ -34,9 +34,11 @@ static void event_task(void *arg)
         case APP_EVENT_BUTTON_DOUBLE:
             system_state_snapshot(&st);
             st.slow_mode = !st.slow_mode;
+            SYSTEM_STATE_SET(slow_mode, st.slow_mode);
             st.requested_rate_hz = st.slow_mode ?
-                CONFIG_IMU_SLOW_RATE_HZ : CONFIG_IMU_RAW_RATE_HZ;
-            system_state_replace(&st);
+                APP_IMU_SLOW_RATE_HZ : APP_IMU_NORMAL_RATE_HZ;
+            SYSTEM_STATE_SET(requested_rate_hz, st.requested_rate_hz);
+
             led_set_pattern(LED_PATTERN_DEBUG_FLASH);
             ESP_LOGI(TAG, "Slow/debug mode=%d rate=%luHz",
                      st.slow_mode,

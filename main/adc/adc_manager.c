@@ -1,26 +1,28 @@
 #include "adc_manager.h"
-
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "esp_adc/adc_oneshot.h"
-#include "esp_adc/adc_cali.h"
-#include "esp_adc/adc_cali_scheme.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-
+#include "freertos/semphr.h"
 #include "board/board_pins.h"
+#include "board/board_config.h"
 #include "system_state.h"
 
 static const char *TAG = "adc";
-static adc_oneshot_unit_handle_t s_adc;
-static adc_cali_handle_t s_cali;
-static adc_channel_t s_channel;
-static bool s_calibrated;
-static SemaphoreHandle_t s_adc_sample_lock;
-static adc_sample_t s_latest_adc_sample;
+static SemaphoreHandle_t s_lock;
+static adc_sample_t s_latest;
+static bool s_valid;
 static uint32_t s_sequence;
-
+#if CONFIG_AUX_ADC_ENABLED && !CONFIG_ADC_DUMMY
+static adc_oneshot_unit_handle_t s_units[8];
+static adc_channel_t s_channels[8];
+static const int s_pins[8] = {
+    CONFIG_AUX_ADC_GPIO_0, CONFIG_AUX_ADC_GPIO_1,
+    CONFIG_AUX_ADC_GPIO_2, CONFIG_AUX_ADC_GPIO_3,
+    CONFIG_AUX_ADC_GPIO_4, CONFIG_AUX_ADC_GPIO_5,
+    CONFIG_AUX_ADC_GPIO_6, CONFIG_AUX_ADC_GPIO_7,
+};
 static adc_atten_t attenuation(void)
 {
 #if CONFIG_ADC_ATTEN_0DB
@@ -33,24 +35,13 @@ static adc_atten_t attenuation(void)
     return ADC_ATTEN_DB_12;
 #endif
 }
-
-static void publish_adc(const adc_sample_t *sample)
-{
-    xSemaphoreTake(s_adc_sample_lock, portMAX_DELAY);
-    s_latest_adc_sample = *sample;
-    xSemaphoreGive(s_adc_sample_lock);
-
-    system_state_t st;
-    system_state_snapshot(&st);
-    st.adc_sample_count++;
-    system_state_replace(&st);
-}
+#endif
 
 static void task_main(void *arg)
 {
     (void)arg;
     TickType_t wake = xTaskGetTickCount();
-    uint64_t count_window = esp_timer_get_time();
+    int64_t window = esp_timer_get_time();
     uint32_t count = 0;
     while (true) {
         system_state_t st;
@@ -58,60 +49,44 @@ static void task_main(void *arg)
         uint32_t rate = st.requested_adc_rate_hz ? st.requested_adc_rate_hz : 1;
         TickType_t period = pdMS_TO_TICKS(1000 / rate);
         if (!period) period = 1;
-
-        // int sum = 0;
-        // bool ok = true;
-#ifndef CONFIG_ADC_DUMMY  
-        for (int i = 0; i < CONFIG_BATTERY_AVERAGE_SAMPLES; ++i) {
-            int raw;
-            if (adc_oneshot_read(s_adc, s_channel, &raw) != ESP_OK) {
-                ok = false;
-                break;
-            }
-            sum += raw;
-        }
-
-
-
-
-    #if CONFIG_TEST_ADC_PRINT
-            ESP_LOGI(TAG, "raw=%d adc=%dmV battery=%lumV percent=%u",
-                     raw, adc_mv, (unsigned long)st.battery_mv,
-                     st.battery_percent);
-    #endif
-#else
-        /* DUMMY code */
-        adc_sample_t dummy = {
-            .sequence = ++s_sequence,
-            .timestamp_ms = esp_timer_get_time() / 1000ULL,
-            .values = {0x100, 0x200, 0x300, 0x400, 0x500, 0x600, 0x700, 0x800},
-            // .adc1 = 1000,
-            // .adc2 = 2000,
-            // .adc3 = 3000,
-            // .adc4 = 4000,
-            // .adc5 = 5000,
-            // .adc6 = 6000,
-            // .adc7 = 7000,
-            // .adc8 = 8000,
+        adc_sample_t sample = {
+            .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
         };
-        publish_adc(&dummy);
-        count++;
+        bool ok = true;
+#if CONFIG_AUX_ADC_ENABLED && !CONFIG_ADC_DUMMY
+        for (unsigned channel = 0; channel < 8 && ok; ++channel) {
+            int sum = 0;
+            for (unsigned n = 0; n < CONFIG_ADC_AVERAGE_SAMPLES; ++n) {
+                int raw;
+                esp_err_t err = adc_oneshot_read(s_units[channel], s_channels[channel], &raw);
+                if (err != ESP_OK) {
+                    system_state_set_error("aux_adc", err);
+                    ok = false;
+                    break;
+                }
+                sum += raw;
+            }
+            sample.values[channel] = sum / CONFIG_ADC_AVERAGE_SAMPLES;
+        }
+#else
+        for (unsigned channel = 0; channel < 8; ++channel)
+            sample.values[channel] = (channel + 1) * 0x100;
 #endif
-        system_state_replace(&st);
-        const uint64_t now = esp_timer_get_time();
-        if (now - count_window >= 1000000ULL) {
-            system_state_snapshot(&st);
-    #ifndef  CONFIG_ADC_DUMMY
-            st.actual_adc_sample_rate_hz = count;        
-    #endif
-            system_state_replace(&st);
-#ifndef CONFIG_ADC_DUMMY
-
+        if (ok) {
+            sample.sequence = ++s_sequence;
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            s_latest = sample;
+            s_valid = true;
+            xSemaphoreGive(s_lock);
+            SYSTEM_STATE_INCREMENT(adc_sample_count);
+            ++count;
+        }
+        int64_t now = esp_timer_get_time();
+        if (now - window >= 1000000) {
+            SYSTEM_STATE_SET(actual_adc_sample_rate_hz,
+                             count * 1000000ULL / (now - window));
             count = 0;
-#endif
-            
-            count = 0;
-            count_window = now;
+            window = now;
         }
         vTaskDelayUntil(&wake, period);
     }
@@ -119,67 +94,60 @@ static void task_main(void *arg)
 
 esp_err_t adc_manager_init(void)
 {
-    s_adc_sample_lock = xSemaphoreCreateMutex();
-    if (!s_adc_sample_lock) {
-        return ESP_ERR_NO_MEM;
-    }
-#ifndef CONFIG_ADC_DUMMY    
-    adc_unit_t unit;
-    esp_err_t err = adc_oneshot_io_to_channel(BOARD_BATTERY_ADC_GPIO,
-                                               &unit, &s_channel);
-    if (err != ESP_OK) return err;
-
-    adc_oneshot_unit_init_cfg_t unit_cfg = {.unit_id = unit};
-    err = adc_oneshot_new_unit(&unit_cfg, &s_adc);
-    if (err != ESP_OK) return err;
-
-    adc_oneshot_chan_cfg_t chan_cfg = {
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-        .atten = attenuation(),
-    };
-    err = adc_oneshot_config_channel(s_adc, s_channel, &chan_cfg);
-    if (err != ESP_OK) return err;
-
-    #if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
-    adc_cali_curve_fitting_config_t cal = {
-        .unit_id = unit,
-        .chan = s_channel,
-        .atten = attenuation(),
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-    };
-    s_calibrated =
-        adc_cali_create_scheme_curve_fitting(&cal, &s_cali) == ESP_OK;
-    #elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
-    adc_cali_line_fitting_config_t cal = {
-        .unit_id = unit,
-        .atten = attenuation(),
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-        .default_vref = 0,
-    };
-    s_calibrated =
-        adc_cali_create_scheme_line_fitting(&cal, &s_cali) == ESP_OK;
-    #endif
-#endif
-    if (!s_calibrated)
-        ESP_LOGW(TAG, "ADC calibration unavailable; voltage is approximate");
+#if !CONFIG_AUX_ADC_ENABLED
     return ESP_OK;
+#else
+    s_lock = xSemaphoreCreateMutex();
+    if (!s_lock) return ESP_ERR_NO_MEM;
+#if !CONFIG_ADC_DUMMY
+    /* Validate the complete mapping before configuring any channels. */
+    adc_unit_t units[8];
+    const int reserved[] = {BOARD_BATTERY_ADC_GPIO, BOARD_I2C_SCL_GPIO,
+        BOARD_I2C_SDA_GPIO, BOARD_LED_GPIO, BOARD_BUTTON_GPIO, BOARD_POWER_HOLD_GPIO};
+    for (unsigned i = 0; i < 8; ++i) {
+        for (unsigned j = 0; j < sizeof(reserved) / sizeof(reserved[0]); ++j)
+            if (s_pins[i] == reserved[j]) return ESP_ERR_INVALID_ARG;
+        for (unsigned j = 0; j < i; ++j)
+            if (s_pins[i] == s_pins[j]) return ESP_ERR_INVALID_ARG;
+        esp_err_t err = adc_oneshot_io_to_channel(s_pins[i], &units[i], &s_channels[i]);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Configure a valid, distinct GPIO for AUX channel %u", i);
+            return err;
+        }
+    }
+    for (unsigned i = 0; i < 8; ++i) {
+        esp_err_t err = board_adc_get_unit(units[i], &s_units[i]);
+        if (err != ESP_OK) return err;
+        adc_oneshot_chan_cfg_t cfg = {
+            .bitwidth = (adc_bitwidth_t)CONFIG_ADC_WIDTH_BITS,
+            .atten = attenuation(),
+        };
+        err = adc_oneshot_config_channel(s_units[i], s_channels[i], &cfg);
+        if (err != ESP_OK) return err;
+    }
+#else
+    ESP_LOGI(TAG, "Using dummy AUX data");
+#endif
+    return ESP_OK;
+#endif
 }
 
 esp_err_t adc_manager_start(void)
 {
+#if !CONFIG_AUX_ADC_ENABLED
+    return ESP_OK;
+#else
     return xTaskCreate(task_main, "adc", 3072, NULL, 4, NULL) == pdPASS
         ? ESP_OK : ESP_ERR_NO_MEM;
+#endif
 }
 
 bool adc_manager_latest(adc_sample_t *sample)
 {
-    if (!sample || !s_adc_sample_lock) return false;
-
-    xSemaphoreTake(s_adc_sample_lock, portMAX_DELAY);
-    *sample = s_latest_adc_sample;
-    bool valid = 1;
-        // (s_latest_adc_sample.flags & IMU_RAW_FLAG_VALID) != 0;
-    xSemaphoreGive(s_adc_sample_lock);
-
+    if (!sample || !s_lock) return false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *sample = s_latest;
+    bool valid = s_valid;
+    xSemaphoreGive(s_lock);
     return valid;
 }

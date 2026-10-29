@@ -1,0 +1,12 @@
+{
+    "C_Cpp.default.compilerPath": "${config:idf.buildPath}/compile_commands.json",
+    "clangd.path": "/Users/kt/.espressif/tools/esp-clangd/esp-21.1.3_20260408/esp-clangd/bin/clangd",
+    "clangd.arguments": [
+      "--background-index",
+      "--query-driver=**",
+      "--compile-commands-dir=/Users/kt/Github_IC/Glove_Firmware/build"
+    ],
+    "idf.flashType": "JTAG",
+    "idf.port": "/dev/tty.usbmodem2101",
+    "idf.currentSetup": "/Users/kt/.espressif/v6.1/esp-idf"
+}

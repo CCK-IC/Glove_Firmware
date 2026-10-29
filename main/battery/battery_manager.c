@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 
 #include "board/board_pins.h"
+#include "board/board_config.h"
 #include "system_state.h"
 
 static const char *TAG = "battery";
@@ -75,9 +76,13 @@ static void task_main(void *arg)
             if (battery_mv < 0) battery_mv = 0;
 
             st.battery_mv = battery_mv;
+            SYSTEM_STATE_SET(battery_mv, st.battery_mv);
             st.battery_percent = percentage(st.battery_mv);
+            SYSTEM_STATE_SET(battery_percent, st.battery_percent);
             st.battery_low = st.battery_mv <= CONFIG_BATTERY_LOW_MV;
+            SYSTEM_STATE_SET(battery_low, st.battery_low);
             st.battery_error = false;
+            SYSTEM_STATE_SET(battery_error, st.battery_error);
 
 #if CONFIG_TEST_BATTERY
             ESP_LOGI(TAG, "raw=%d adc=%dmV battery=%lumV percent=%u",
@@ -86,9 +91,9 @@ static void task_main(void *arg)
 #endif
         } else {
             st.battery_error = true;
+            SYSTEM_STATE_SET(battery_error, st.battery_error);
         }
 
-        system_state_replace(&st);
         vTaskDelay(pdMS_TO_TICKS(st.status_period_ms));
     }
 }
@@ -100,8 +105,7 @@ esp_err_t battery_manager_init(void)
                                                &unit, &s_channel);
     if (err != ESP_OK) return err;
 
-    adc_oneshot_unit_init_cfg_t unit_cfg = {.unit_id = unit};
-    err = adc_oneshot_new_unit(&unit_cfg, &s_adc);
+    err = board_adc_get_unit(unit, &s_adc);
     if (err != ESP_OK) return err;
 
     adc_oneshot_chan_cfg_t chan_cfg = {

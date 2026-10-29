@@ -19,7 +19,7 @@
                      0x55,0x4d,0x54,0x4f,(suffix),0x00,0x7c,0x8f)
 
 extern const ble_uuid128_t UUID_IMU_SERVICE;
-// extern const ble_uuid128_t UUID_IMU_QUAT;
+extern const ble_uuid128_t UUID_IMU_QUAT;
 extern const ble_uuid128_t UUID_IMU_RAW;
 // extern const ble_uuid128_t UUID_AUX_SERVICE;
 // extern const ble_uuid128_t UUID_AUX_DATA;

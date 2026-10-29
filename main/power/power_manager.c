@@ -44,8 +44,9 @@ void power_off_sequence(uint8_t reason)
     if (st.power_off_pending) return;
 
     st.power_off_pending = true;
+    SYSTEM_STATE_SET(power_off_pending, st.power_off_pending);
     st.power_off_reason = reason;
-    system_state_replace(&st);
+    SYSTEM_STATE_SET(power_off_reason, st.power_off_reason);
 
     ESP_LOGW(TAG, "Power-off sequence, reason=%u", reason);
     led_set_pattern(LED_PATTERN_POWER_OFF);

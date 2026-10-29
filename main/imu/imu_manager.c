@@ -18,6 +18,7 @@ static const char *TAG = "imu";
 static icm20948_device_t s_icm;
 static icm0948_config_i2c_t icm_config;
 static SemaphoreHandle_t s_sample_lock;
+static imu_dmp_sample_t s_latest;
 static SemaphoreHandle_t s_raw_sample_lock;
 static imu_raw_sample_t s_latest_raw;
 static TaskHandle_t s_task;
@@ -35,17 +36,14 @@ static int32_t q30(double v)
     return (int32_t)llround(v * 1073741824.0);
 }
 
-// static void publish(const imu_sample_t *sample)
-// {
-//     xSemaphoreTake(s_sample_lock, portMAX_DELAY);
-//     s_latest = *sample;
-//     xSemaphoreGive(s_sample_lock);
+static void publish(const imu_dmp_sample_t *sample)
+{
+    xSemaphoreTake(s_sample_lock, portMAX_DELAY);
+    s_latest = *sample;
+    xSemaphoreGive(s_sample_lock);
 
-//     system_state_t st;
-//     system_state_snapshot(&st);
-//     st.sample_count++;
-//     system_state_replace(&st);
-// }
+    SYSTEM_STATE_INCREMENT(sample_count);
+}
 
 static void publish_raw(const imu_raw_sample_t *sample)
 {
@@ -53,12 +51,8 @@ static void publish_raw(const imu_raw_sample_t *sample)
     s_latest_raw = *sample;
     xSemaphoreGive(s_raw_sample_lock);
 
-    system_state_t st;
-    system_state_snapshot(&st);
-    st.raw_sample_count++;
-    system_state_replace(&st);
+    SYSTEM_STATE_INCREMENT(raw_sample_count);
 }
-
 
 static void synthetic_sample(imu_dmp_sample_t *out)
 {
@@ -72,6 +66,16 @@ static void synthetic_sample(imu_dmp_sample_t *out)
     out->flags = IMU_FLAG_VALID | IMU_FLAG_SYNTHETIC;
 }
 
+/* Evaluate each driver call once and retain its native status in boot logs. */
+#define IMU_INIT_CHECK(call, error) do { \
+    icm20948_status_e init_rc_ = (call); \
+    if (init_rc_ != ICM_20948_STAT_OK) { \
+        ESP_LOGE(TAG, "IMU init: %s failed: rc=%d (0x%x), returning %s", \
+                 #call, (int)init_rc_, (unsigned)init_rc_, esp_err_to_name(error)); \
+        return (error); \
+    } \
+} while (0)
+
 static esp_err_t configure_sensor(void)
 {
 #if CONFIG_IMU_ENABLED
@@ -82,7 +86,11 @@ static esp_err_t configure_sensor(void)
     };
     esp_err_t err = i2c_master_bus_add_device(board_i2c_bus(),
                                                &cfg, &icm_config.dev_handle);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "IMU init: i2c_master_bus_add_device failed: %s (0x%x), address=0x%02x",
+                 esp_err_to_name(err), (unsigned)err, CONFIG_IMU_I2C_ADDRESS);
+        return err;
+    }
 
     icm20948_init_i2c(&s_icm, &icm_config);
 
@@ -102,42 +110,55 @@ static esp_err_t configure_sensor(void)
     s_icm._enabled_Android_intr_0 = 0; // Keep track of which Android sensor interrupts are enabled: 0-31
     s_icm._enabled_Android_intr_1 = 0; // Keep track of which Android sensor interrupts are enabled: 32-
 
-
     uint8_t who = 0;
-    esp_err_t rc = icm20948_get_who_am_i(&s_icm, &who);
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        if (rc != ICM_20948_STAT_OK ||
-            who != ICM_20948_WHOAMI) {
-            ESP_LOGE(TAG, "Trial %d: WHO_AM_I=0x%02x, expected 0x%02x", i, who, ICM_20948_WHOAMI);
-        } else {
-            ESP_LOGI(TAG, "DMP WHO OK: 0x%02x", who);
-            break;
-        }
+    icm20948_status_e rc = ICM_20948_STAT_ERR;
+    for (unsigned attempt = 0; attempt < CONFIG_IMU_I2C_RETRIES; ++attempt) {
+        rc = icm20948_get_who_am_i(&s_icm, &who);
+        ESP_LOGW(TAG, "WHO_AM_I attempt %u: rc=%d identity=0x%02x",
+                 attempt + 1, rc, who);
+        if (rc == ICM_20948_STAT_OK && who == ICM_20948_WHOAMI) break;
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
-    
-    if(rc != ICM_20948_STAT_OK)return ESP_ERR_NOT_FOUND;
+    if (rc != ICM_20948_STAT_OK || who != ICM_20948_WHOAMI) {
+        ESP_LOGE(TAG, "IMU init: icm20948_get_who_am_i failed after %u attempts: "
+                 "rc=%d (0x%x), identity=0x%02x expected=0x%02x",
+                 (unsigned)CONFIG_IMU_I2C_RETRIES, (int)rc, (unsigned)rc,
+                 who, ICM_20948_WHOAMI);
+        return ESP_ERR_NOT_FOUND;
+    }
 
     system_state_t st;
     system_state_snapshot(&st);
     st.who_am_i = who;
+    SYSTEM_STATE_SET(who_am_i, st.who_am_i);
     st.imu_state = IMU_STATE_INITIALIZING;
-    system_state_replace(&st);
+    SYSTEM_STATE_SET(imu_state, st.imu_state);
 
-    icm20948_sw_reset(&s_icm);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    rc = icm20948_sw_reset(&s_icm);
+    if (rc != ICM_20948_STAT_OK) {
+        ESP_LOGE(TAG, "IMU init: icm20948_sw_reset failed: rc=%d (0x%x); continuing",
+                 (int)rc, (unsigned)rc);
+    } else {
+        ESP_LOGI(TAG, "IMU init: icm20948_sw_reset rc=%d", (int)rc);
+    }
     vTaskDelay(pdMS_TO_TICKS(250));
+    s_icm._last_bank = 255;  // Force the next bank selection.
+    IMU_INIT_CHECK(icm20948_sleep(&s_icm, false), ESP_FAIL);
+    IMU_INIT_CHECK(icm20948_low_power(&s_icm, false), ESP_FAIL);
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     icm20948_internal_sensor_id_bm sensors = (icm20948_internal_sensor_id_bm)(ICM_20948_INTERNAL_ACC | ICM_20948_INTERNAL_GYR);
 
 	// Set Gyro and Accelerometer to a particular sample mode
 	// optiona: SAMPLE_MODE_CONTINUOUS. SAMPLE_MODE_CYCLED
-	icm20948_set_sample_mode(&s_icm, sensors, SAMPLE_MODE_CONTINUOUS); 
+	IMU_INIT_CHECK(icm20948_set_sample_mode(&s_icm, sensors, SAMPLE_MODE_CONTINUOUS), ESP_FAIL);
 
 	// Set full scale ranges for both acc and gyr
 	icm20948_fss_t myfss;
 	myfss.a = GPM_2;   // (icm20948_accel_config_fs_sel_e)
 	myfss.g = DPS_250; // (icm20948_gyro_config_1_fs_sel_e)
-	icm20948_set_full_scale(&s_icm, sensors, myfss);
+	IMU_INIT_CHECK(icm20948_set_full_scale(&s_icm, sensors, myfss), ESP_FAIL);
     s_accel_range_code = 0;
     s_gyro_range_code = 0;
 
@@ -145,37 +166,29 @@ static esp_err_t configure_sensor(void)
 	icm20948_dlpcfg_t myDLPcfg;
 	myDLPcfg.a = ACC_D473BW_N499BW;
 	myDLPcfg.g = GYR_D361BW4_N376BW5;
-	icm20948_set_dlpf_cfg(&s_icm, sensors, myDLPcfg);
+	IMU_INIT_CHECK(icm20948_set_dlpf_cfg(&s_icm, sensors, myDLPcfg), ESP_FAIL);
 
 	// Choose whether or not to use DLPF
-	icm20948_enable_dlpf(&s_icm, ICM_20948_INTERNAL_ACC, false);
-	icm20948_enable_dlpf(&s_icm, ICM_20948_INTERNAL_GYR, false);
+	IMU_INIT_CHECK(icm20948_enable_dlpf(&s_icm, ICM_20948_INTERNAL_ACC, false), ESP_FAIL);
+	IMU_INIT_CHECK(icm20948_enable_dlpf(&s_icm, ICM_20948_INTERNAL_GYR, false), ESP_FAIL);
 
 	// Now wake the sensor up
-	icm20948_sleep(&s_icm, false);
-	icm20948_low_power(&s_icm, false);
-    if (icm20948_configure_magnetometer(&s_icm, AK09916_MODE_CONT_100_HZ) != ICM_20948_STAT_OK) {
-		ESP_LOGE(TAG, "magnetometer configuration failed");
-		return ESP_ERR_NOT_FOUND;
-	}
+	IMU_INIT_CHECK(icm20948_sleep(&s_icm, false), ESP_FAIL);
+	IMU_INIT_CHECK(icm20948_low_power(&s_icm, false), ESP_FAIL);
+    IMU_INIT_CHECK(icm20948_configure_magnetometer(&s_icm, AK09916_MODE_CONT_100_HZ),
+                   ESP_ERR_NOT_FOUND);
 #endif
 
-#if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_DMP_ENABLED
-    s_accel_range_code = CONFIG_IMU_RAW_DMP_ACCEL_RANGE_CODE;
-    s_gyro_range_code = CONFIG_IMU_RAW_DMP_GYRO_RANGE_CODE;
-#endif
 
 #if CONFIG_IMU_DMP_ENABLED
-    icm20948_status_e rc = icm20948_init_dmp_sensor_with_defaults(&s_icm); //TOBE overided
-    if (rc != ICM_20948_STAT_OK) {
-        ESP_LOGE(TAG, "DMP defaults failed: %d", rc);
-        return ESP_FAIL;
-    }
+    IMU_INIT_CHECK(icm20948_init_dmp_sensor_with_defaults(&s_icm), ESP_FAIL);
 
     //PATCH2
     system_state_snapshot(&st);
     st.imu_dmp = true;
+    SYSTEM_STATE_SET(imu_dmp, st.imu_dmp);
     st.requested_rate_hz = CONFIG_IMU_DMP_RATE_HZ;
+    SYSTEM_STATE_SET(requested_rate_hz, st.requested_rate_hz);
 
     /*
     * This is an expected initial value only. The runtime one-second measurement
@@ -183,30 +196,28 @@ static esp_err_t configure_sensor(void)
     */
     #ifdef CONFIG_IMU_DMP_MANAGED_RATE_HZ
     st.actual_dmp_sample_rate_hz = CONFIG_IMU_DMP_MANAGED_RATE_HZ;
+    SYSTEM_STATE_SET(actual_dmp_sample_rate_hz, st.actual_dmp_sample_rate_hz);
     #else
     st.actual_dmp_sample_rate_hz = CONFIG_IMU_DMP_OVERIDE_RATE_HZ;
+    SYSTEM_STATE_SET(actual_dmp_sample_rate_hz, st.actual_dmp_sample_rate_hz);
     #endif
-    system_state_replace(&st);
+
     //PATCH2
 
-    rc = inv_icm20948_enable_dmp_sensor(
-        &s_icm, INV_ICM20948_SENSOR_ORIENTATION, 1);
-    if (rc != ICM_20948_STAT_OK) return ESP_FAIL;
+    IMU_INIT_CHECK(inv_icm20948_enable_dmp_sensor(
+        &s_icm, INV_ICM20948_SENSOR_ORIENTATION, 1), ESP_FAIL);
+    IMU_INIT_CHECK(inv_icm20948_set_dmp_sensor_period(
+        &s_icm, DMP_ODR_Reg_Quat9, 0), ESP_FAIL);
 
-    rc = inv_icm20948_set_dmp_sensor_period(
-        &s_icm, DMP_ODR_Reg_Quat9, 0);
-    if (rc != ICM_20948_STAT_OK) return ESP_FAIL;
-
-    if (icm20948_enable_fifo(&s_icm, true) != ICM_20948_STAT_OK ||
-        icm20948_enable_dmp(&s_icm, true) != ICM_20948_STAT_OK ||
-        icm20948_reset_dmp(&s_icm) != ICM_20948_STAT_OK ||
-        icm20948_reset_fifo(&s_icm) != ICM_20948_STAT_OK) {
-        return ESP_FAIL;
-    }
+    IMU_INIT_CHECK(icm20948_enable_fifo(&s_icm, true), ESP_FAIL);
+    IMU_INIT_CHECK(icm20948_enable_dmp(&s_icm, true), ESP_FAIL);
+    IMU_INIT_CHECK(icm20948_reset_dmp(&s_icm), ESP_FAIL);
+    IMU_INIT_CHECK(icm20948_reset_fifo(&s_icm), ESP_FAIL);
 
     system_state_snapshot(&st);
     st.imu_dmp = true;
-    system_state_replace(&st);
+    SYSTEM_STATE_SET(imu_dmp, st.imu_dmp);
+
 #endif
 
     return ESP_OK;
@@ -218,7 +229,9 @@ static void task_main(void *arg)
     TickType_t wake = xTaskGetTickCount();
     uint64_t count_window = esp_timer_get_time();
     uint32_t count = 0;
-    // unsigned consecutive_errors = 0;
+#if CONFIG_IMU_DMP_ENABLED
+    unsigned consecutive_errors = 0;
+#endif
 #if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
     // uint64_t raw_due_us = count_window;
     uint32_t raw_count = 0;
@@ -234,13 +247,14 @@ static void task_main(void *arg)
         // TickType_t period = pdMS_TO_TICKS(1000U / fifo_poll_rate);
         if (!period) period = 1;
 
-        bool valid = false;
-        
 #if CONFIG_IMU_DMP_ENABLED
-        // imu_sample_t sample = {
-        //     .sequence = ++s_sequence,
-        //     .timestamp_ms = esp_timer_get_time() / 1000ULL,
-        // };
+        bool valid = false;
+        imu_dmp_sample_t sample = {
+            .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+        };
+#endif
+
+#if CONFIG_IMU_DMP_ENABLED
         if (s_sensor_ok) {
             for (unsigned frame = 0; frame < 1; ++frame) {
                 icm_20948_DMP_data_t d = {0};
@@ -268,71 +282,64 @@ static void task_main(void *arg)
                         CONFIG_IMU_ERROR_REINIT_COUNT) {
                         system_state_snapshot(&st);
                         st.imu_state = IMU_STATE_DEGRADED;
-                        system_state_replace(&st);
+                        SYSTEM_STATE_SET(imu_state, st.imu_state);
 
                         icm20948_status_e reset_rc =
                             icm20948_reset_fifo(&s_icm);
 
                         if (reset_rc == ICM_20948_STAT_OK) {
                             system_state_snapshot(&st);
-                            st.fifo_overflows++;
-                            system_state_replace(&st);
-                        } else{
-                            system_state_snapshot(&st);
-                            if (st.fifo_overflows>0) st.fifo_overflows--;
-                            system_state_replace(&st);
+                            SYSTEM_STATE_INCREMENT(fifo_overflows);
                         }
 
                         consecutive_errors = 0;
                     }
 
-                    // break;
+                    break;
                 }
 
                 consecutive_errors = 0;
 
-                if ((rc == ICM_20948_STAT_OK) || (rc == ICM_20948_STAT_FIFO_MORE_DATA_AVAIL)) 
+                if ((rc == ICM_20948_STAT_OK) || (rc == ICM_20948_STAT_FIFO_MORE_DATA_AVAIL))
 		        {
                     if ((d.header & DMP_header_bitmap_Quat9) != 0) {
-                        imu_sample_t sample = {
+                        sample = (imu_dmp_sample_t){
                             .sequence = ++s_sequence,
                             .timestamp_ms =
                                 (uint32_t)(esp_timer_get_time() / 1000ULL),
                             .accuracy = (uint16_t)d.Quat9.Data.Accuracy,
                             .flags = IMU_FLAG_VALID | IMU_FLAG_DMP,
                         };
-    
+
                         double q1 =
                             (double)d.Quat9.Data.Q1 / 1073741824.0;
                         double q2 =
                             (double)d.Quat9.Data.Q2 / 1073741824.0;
                         double q3 =
                             (double)d.Quat9.Data.Q3 / 1073741824.0;
-    
+
                         double vector_sum =
                             q1 * q1 + q2 * q2 + q3 * q3;
-    
+
                         double q0 = sqrt(fmax(0.0, 1.0 - vector_sum));
                         double norm = sqrt(
                             q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
-    
+
                         if (norm > 0.0) {
                             q0 /= norm;
                             q1 /= norm;
                             q2 /= norm;
                             q3 /= norm;
                         }
-    
+
                         sample.q0_q30 = q30(q0);
                         sample.q1_q30 = q30(q1);
                         sample.q2_q30 = q30(q2);
                         sample.q3_q30 = q30(q3);
-    
-                        publish(&sample);
-                        count++;
+
+                        valid = true;
                     }
                 }
-
 
                 if (rc != ICM_20948_STAT_FIFO_MORE_DATA_AVAIL) {
                     break;
@@ -343,12 +350,9 @@ static void task_main(void *arg)
 
 #if CONFIG_IMU_SYNTHETIC_FALLBACK
         if (!s_sensor_ok) {
+            sample.sequence = ++s_sequence;
             synthetic_sample(&sample);
             valid = true;
-        }
-#elif CONFIG_IMU_DMP_ENABLED
-        if (!s_sensor_ok || !valid) {
-            imu_manager_fifo_reinitialize();
         }
 #endif
 
@@ -358,8 +362,7 @@ static void task_main(void *arg)
             count++;
         } else {
             system_state_snapshot(&st);
-            st.dropped_samples++;
-            system_state_replace(&st);
+            SYSTEM_STATE_INCREMENT(dropped_samples);
         }
 #endif
 
@@ -371,8 +374,8 @@ static void task_main(void *arg)
             //     CONFIG_IMU_RAW_RATE_HZ ? CONFIG_IMU_RAW_RATE_HZ : 1;
             // raw_due_us = raw_now_us + 1000000ULL / raw_rate;
 
-            icm20948_agmt_t agmt = {0};
 #ifndef CONFIG_IMU_RAW_DUMMY
+            icm20948_agmt_t agmt = {0};
             if (icm20948_get_agmt(&s_icm, &agmt) ==
                 ICM_20948_STAT_OK) {
                 imu_raw_sample_t raw = {
@@ -397,8 +400,8 @@ static void task_main(void *arg)
                         IMU_RAW_FLAG_GYRO_VALID |
                         IMU_RAW_FLAG_MAG_VALID |
                         IMU_RAW_FLAG_TEMP_VALID,
-                    .accel_range_code = s_accel_range_code,
-                    .gyro_range_code = s_gyro_range_code,
+                    .accel_range_code = agmt.fss.a,
+                    .gyro_range_code = agmt.fss.g,
                 };
 
                 if (st.imu_dmp) {
@@ -409,9 +412,9 @@ static void task_main(void *arg)
                 raw_count++;
             } else {
                 system_state_snapshot(&st);
-                st.dropped_raw_samples++;
-                system_state_replace(&st);
+                SYSTEM_STATE_INCREMENT(dropped_raw_samples);
             }
+        }
 #else
         }
 
@@ -450,19 +453,22 @@ static void task_main(void *arg)
         if (now - count_window >= 1000000ULL) {
             system_state_snapshot(&st);
             st.actual_dmp_sample_rate_hz = count;
+            SYSTEM_STATE_SET(actual_dmp_sample_rate_hz, st.actual_dmp_sample_rate_hz);
             st.imu_state = s_sensor_ok ?
                 IMU_STATE_RUNNING : IMU_STATE_DEGRADED;
+            SYSTEM_STATE_SET(imu_state, st.imu_state);
 #if CONFIG_IMU_RAW_ENABLED
             st.actual_raw_sample_rate_hz = raw_count;
+            SYSTEM_STATE_SET(actual_raw_sample_rate_hz, st.actual_raw_sample_rate_hz);
 #endif
-            system_state_replace(&st);
+
 #if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
             xSemaphoreTake(s_raw_sample_lock, portMAX_DELAY);
             s_latest_raw.actual_rate_hz = (uint16_t)raw_count;
             xSemaphoreGive(s_raw_sample_lock);
             raw_count = 0;
 #endif
-            
+
             count = 0;
             count_window = now;
         }
@@ -476,10 +482,14 @@ static void task_main(void *arg)
 esp_err_t imu_manager_init(void)
 {
     s_sample_lock = xSemaphoreCreateMutex();
-    if (!s_sample_lock) return ESP_ERR_NO_MEM;
+    if (!s_sample_lock) {
+        ESP_LOGE(TAG, "IMU init: sample mutex allocation failed: ESP_ERR_NO_MEM");
+        return ESP_ERR_NO_MEM;
+    }
 
     s_raw_sample_lock = xSemaphoreCreateMutex();
     if (!s_raw_sample_lock) {
+        ESP_LOGE(TAG, "IMU init: raw sample mutex allocation failed: ESP_ERR_NO_MEM");
         vSemaphoreDelete(s_sample_lock);
         s_sample_lock = NULL;
         return ESP_ERR_NO_MEM;
@@ -488,7 +498,7 @@ esp_err_t imu_manager_init(void)
     system_state_t st;
     system_state_snapshot(&st);
     st.imu_state = IMU_STATE_INITIALIZING;
-    system_state_replace(&st);
+    SYSTEM_STATE_SET(imu_state, st.imu_state);
 
     esp_err_t err = configure_sensor();
     s_sensor_ok = err == ESP_OK;
@@ -498,7 +508,8 @@ esp_err_t imu_manager_init(void)
         ESP_LOGW(TAG, "Sensor unavailable; using marked synthetic data");
         system_state_snapshot(&st);
         st.imu_state = IMU_STATE_DEGRADED;
-        system_state_replace(&st);
+        SYSTEM_STATE_SET(imu_state, st.imu_state);
+
         return ESP_OK;
 #else
         system_state_set_error("imu", err);
@@ -529,31 +540,36 @@ void imu_manager_stop(void)
 esp_err_t imu_manager_sleep(void)
 {
     if (!s_sensor_ok) return ESP_OK;
+#if CONFIG_IMU_ENABLED
     return icm20948_sleep(&s_icm, true) == ICM_20948_STAT_OK
         ? ESP_OK : ESP_FAIL;
+#else
+    return ESP_OK;
+#endif
 }
 
 esp_err_t imu_manager_fifo_reinitialize(void)
 {
-    system_state_t st;
-    system_state_snapshot(&st);
-    st.imu_reinitializations++;
-    system_state_replace(&st);
+    SYSTEM_STATE_INCREMENT(imu_reinitializations);
 
     if (!s_sensor_ok) return ESP_ERR_INVALID_STATE;
+#if CONFIG_IMU_DMP_ENABLED
     return icm20948_reset_fifo(&s_icm) == ICM_20948_STAT_OK
         ? ESP_OK : ESP_FAIL;
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 }
 
-// bool imu_manager_latest(imu_sample_t *sample)
-// {
-//     if (!sample || !s_sample_lock) return false;
-//     xSemaphoreTake(s_sample_lock, portMAX_DELAY);
-//     *sample = s_latest;
-//     bool valid = (s_latest.flags & IMU_FLAG_VALID) != 0;
-//     xSemaphoreGive(s_sample_lock);
-//     return valid;
-// }
+bool imu_manager_latest(imu_dmp_sample_t *sample)
+{
+    if (!sample || !s_sample_lock) return false;
+    xSemaphoreTake(s_sample_lock, portMAX_DELAY);
+    *sample = s_latest;
+    bool valid = (s_latest.flags & IMU_FLAG_VALID) != 0;
+    xSemaphoreGive(s_sample_lock);
+    return valid;
+}
 
 bool imu_manager_latest_raw(imu_raw_sample_t *sample)
 {

@@ -9,3 +9,6 @@ esp_err_t board_config_init(void);
 const char *board_name(void);
 i2c_master_bus_handle_t board_i2c_bus(void);
 bool board_button_pressed(void);
+#include "esp_adc/adc_oneshot.h"
+/* Initialization is serialized by app_main; all users share one handle per unit. */
+esp_err_t board_adc_get_unit(adc_unit_t unit, adc_oneshot_unit_handle_t *out);

@@ -130,3 +130,15 @@ bool board_button_pressed(void)
     const int level = gpio_get_level((gpio_num_t)BOARD_BUTTON_GPIO);
     return level == CONFIG_BOARD_BUTTON_ACTIVE_LEVEL;
 }
+esp_err_t board_adc_get_unit(adc_unit_t unit, adc_oneshot_unit_handle_t *out)
+{
+    static adc_oneshot_unit_handle_t units[SOC_ADC_PERIPH_NUM];
+    if (!out || (unsigned)unit >= SOC_ADC_PERIPH_NUM) return ESP_ERR_INVALID_ARG;
+    if (!units[unit]) {
+        adc_oneshot_unit_init_cfg_t cfg = {.unit_id = unit};
+        esp_err_t err = adc_oneshot_new_unit(&cfg, &units[unit]);
+        if (err != ESP_OK) return err;
+    }
+    *out = units[unit];
+    return ESP_OK;
+}

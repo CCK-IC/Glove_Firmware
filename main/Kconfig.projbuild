@@ -353,7 +353,7 @@ mainmenu "Project configuration"
         config BLE_CONNECTION_UPDATE_DELAY_MS
             int "Delay before connection-parameter request"
             depends on BLE_REQUEST_CONNECTION_UPDATE
-            range 500 30000
+            range 100 30000
             default 3000
 
         config BLE_CONN_INTERVAL_MIN_UNITS
@@ -440,6 +440,60 @@ mainmenu "Project configuration"
                 instead of reading the actual ADC. The value is a sawtooth waveform
                 that cycles from 0 to 4095 (12-bit) over 10 seconds.
 
+        config ADC_AVERAGE_SAMPLES
+            int "Samples averaged per AUX channel"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            range 1 128
+            default 1
+
+        config AUX_ADC_GPIO_0
+            int "AUX channel 0 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            range -1 48
+            default -1
+
+        config AUX_ADC_GPIO_1
+            int "AUX channel 1 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            range -1 48
+            default -1
+
+        config AUX_ADC_GPIO_2
+            int "AUX channel 2 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            range -1 48
+            default -1
+
+        config AUX_ADC_GPIO_3
+            int "AUX channel 3 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            range -1 48
+            default -1
+
+        config AUX_ADC_GPIO_4
+            int "AUX channel 4 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            range -1 48
+            default -1
+
+        config AUX_ADC_GPIO_5
+            int "AUX channel 5 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            range -1 48
+            default -1
+
+        config AUX_ADC_GPIO_6
+            int "AUX channel 6 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            range -1 48
+            default -1
+
+        config AUX_ADC_GPIO_7
+            int "AUX channel 7 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            range -1 48
+            default -1
+
     endmenu
 
     menu "ICM-20948 Configuration"
@@ -468,6 +522,7 @@ mainmenu "Project configuration"
         config IMU_DMP_ENABLED
             bool "Enable managed-component DMP integration"
             depends on IMU_ENABLED
+            select ICM_20948_USE_DMP
             default n
             help
                 Requires the managed component's legal DMP image and API.
@@ -475,6 +530,7 @@ mainmenu "Project configuration"
         
         config IMU_DMP_DUMMY
             bool "Output generated DMP data in fetching stage by skipping actual sensor reading"
+            depends on !IMU_DMP_ENABLED
             default n
             help
                 For development and testing, this option generates dummy quaternion values
@@ -501,6 +557,7 @@ mainmenu "Project configuration"
         
         config IMU_RAW_DUMMY
             bool "Output generated raw data in fetching stage by skipping actual sensor reading"
+            depends on !IMU_RAW_ENABLED
             default n
             help
                 For development and testing, this option generates dummy AGMT values
