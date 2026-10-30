@@ -1,8 +1,10 @@
 #include "ble_manager.h"
 
 #include <string.h>
+#include <stdio.h>
 #include "sdkconfig.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
 
@@ -680,8 +682,18 @@ esp_err_t ble_manager_init(void)
     int rc = gatt_server_init();
     if (rc) return ESP_FAIL;
 
-    rc = ble_svc_gap_device_name_set(APP_DEVICE_NAME);
+    uint8_t mac[6];
+    err = esp_read_mac(mac, ESP_MAC_BT);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Bluetooth MAC read failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    char device_name[sizeof(APP_DEVICE_NAME) + 5];
+    snprintf(device_name, sizeof(device_name), "%s-%02X%02X",
+             APP_DEVICE_NAME, mac[4], mac[5]);
+    rc = ble_svc_gap_device_name_set(device_name);
     if (rc) return ESP_FAIL;
+    ESP_LOGI(TAG, "Device name: %s", device_name);
 
     ble_store_config_init();
     return ESP_OK;
