@@ -5,6 +5,7 @@
 #include "app_config.h"
 #include "system_state.h"
 #include "imu/imu_manager.h"
+#include "adc/adc_manager.h"
 
 #include <string.h>
 #include "esp_timer.h"
@@ -13,7 +14,7 @@
 #include "services/gatt/ble_svc_gatt.h"
 
 const ble_uuid128_t UUID_IMU_SERVICE = XIAO_UUID128(0x01);
-// const ble_uuid128_t UUID_IMU_QUAT = XIAO_UUID128(0x02);
+const ble_uuid128_t UUID_IMU_QUAT = XIAO_UUID128(0x02);
 const ble_uuid128_t UUID_IMU_RAW = XIAO_UUID128(0x99);
 const ble_uuid128_t UUID_AUX_SERVICE = XIAO_UUID128(0x10);
 const ble_uuid128_t UUID_AUX_DATA = XIAO_UUID128(0x11);
@@ -21,14 +22,14 @@ const ble_uuid128_t UUID_STATUS_SERVICE = XIAO_UUID128(0x20);
 const ble_uuid128_t UUID_STATUS_DATA = XIAO_UUID128(0x21);
 const ble_uuid128_t UUID_CONTROL = XIAO_UUID128(0x22);
 
-// uint16_t gatt_imu_handle;
+uint16_t gatt_imu_handle;
 uint16_t gatt_imu_raw_handle;
 uint16_t gatt_aux_handle;
 uint16_t gatt_status_handle;
 uint16_t gatt_control_handle;
 uint16_t gatt_battery_handle;
 
-// static bool s_imu_notify;
+static bool s_imu_notify;
 static bool s_imu_raw_notify;
 static bool s_aux_notify;
 static bool s_status_notify;
@@ -66,24 +67,26 @@ static int access_cb(uint16_t conn, uint16_t attr,
     (void)arg;
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        // if (attr == gatt_imu_handle) {
-        //     imu_sample_t sample = {0};
-        //     uint8_t packet[IMU_PACKET_Q30_SIZE];
-        //     if (!imu_manager_latest(&sample)) {
-        //         return BLE_ATT_ERR_UNLIKELY;
-        //     }
-        //     size_t len = ble_encode_imu_for_mtu(
-        //         packet,
-        //         sizeof(packet),
-        //         effective_mtu(conn),
-        //         &sample);
-        //     if (len == 0) {
-        //         return BLE_ATT_ERR_INSUFFICIENT_RES;
-        //     }
-        //     return append(ctxt->om, packet, len);
-        // }
+#if CONFIG_IMU_DMP_ENABLED
+        if (attr == gatt_imu_handle) {
+            imu_dmp_sample_t sample = {0};
+            uint8_t packet[IMU_PACKET_Q30_SIZE];
+            if (!imu_manager_latest(&sample)) {
+                return BLE_ATT_ERR_UNLIKELY;
+            }
+            size_t len = ble_encode_imu_for_mtu(
+                packet,
+                sizeof(packet),
+                effective_mtu(conn),
+                &sample);
+            if (len == 0) {
+                return BLE_ATT_ERR_INSUFFICIENT_RES;
+            }
+            return append(ctxt->om, packet, len);
+        }
+#endif
         if (attr == gatt_imu_raw_handle) {
-#if CONFIG_IMU_RAW_ENABLED
+#if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
             imu_raw_sample_t sample = {0};
             uint8_t packet[IMU_RAW_FULL_V1_SIZE];
             if (!imu_manager_latest_raw(&sample)) {
@@ -103,9 +106,10 @@ static int access_cb(uint16_t conn, uint16_t attr,
 #endif
         }
         if (attr == gatt_aux_handle) {
-            int16_t values[8] = {0};
+            adc_sample_t sample;
+            if (!adc_manager_latest(&sample)) return BLE_ATT_ERR_UNLIKELY;
             uint8_t data[AUX_PACKET_V1_SIZE];
-            ble_encode_aux(data, esp_timer_get_time() / 1000, 0, values);
+            ble_encode_aux(data, sample.timestamp_ms, sample.sequence, sample.values);
             return append(ctxt->om, data, sizeof(data));
         }
         if (attr == gatt_status_handle) {
@@ -160,13 +164,15 @@ static int access_cb(uint16_t conn, uint16_t attr,
             if (len != 3 || value < 1 || value > 200)
                 return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
             st.requested_rate_hz = value;
-            system_state_replace(&st);
+            SYSTEM_STATE_SET(requested_rate_hz, st.requested_rate_hz);
+
             break;
         case 0x02:
             if (len != 3 || value < 250)
                 return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
             st.status_period_ms = value;
-            system_state_replace(&st);
+            SYSTEM_STATE_SET(status_period_ms, st.status_period_ms);
+
             break;
         case 0x03:
             app_event_publish(APP_EVENT_BUTTON_HOLD, 0);
@@ -175,12 +181,14 @@ static int access_cb(uint16_t conn, uint16_t attr,
             if (len != 2 || data[1] > 1)
                 return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
             st.slow_mode = data[1];
+            SYSTEM_STATE_SET(slow_mode, st.slow_mode);
             st.requested_rate_hz = data[1] ?
-                CONFIG_IMU_SLOW_RATE_HZ : CONFIG_IMU_RAW_RATE_HZ;
+                APP_IMU_SLOW_RATE_HZ : APP_IMU_NORMAL_RATE_HZ;
+            SYSTEM_STATE_SET(requested_rate_hz, st.requested_rate_hz);
             ESP_LOGI("BLE_CTRL", "slow_mode=%u, rate=%luHz",
                      st.slow_mode,
                      (unsigned long)st.requested_rate_hz);            
-            system_state_replace(&st);
+
             break;
         case 0x05:
             if (len != 3 || data[1] != 0xA5 || data[2] != 0x5A)
@@ -231,12 +239,14 @@ static const struct ble_gatt_svc_def services[] = {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &UUID_IMU_SERVICE.u,
         .characteristics = (struct ble_gatt_chr_def[]) {
-            // {
-            //     .uuid = &UUID_IMU_QUAT.u,
-            //     .access_cb = access_cb,
-            //     .val_handle = &gatt_imu_handle,
-            //     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
-            // },
+#if CONFIG_IMU_DMP_ENABLED
+            {
+                .uuid = &UUID_IMU_QUAT.u,
+                .access_cb = access_cb,
+                .val_handle = &gatt_imu_handle,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+            },
+#endif
             {
                 .uuid = &UUID_IMU_RAW.u,
                 .access_cb = access_cb,
@@ -296,25 +306,38 @@ void gatt_server_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
 
 void gatt_set_subscription(uint16_t attr, bool enabled)
 {
-    // if (attr == gatt_imu_handle) s_imu_notify = enabled;
+    if (attr == gatt_imu_handle) s_imu_notify = enabled;
     if (attr == gatt_imu_raw_handle) s_imu_raw_notify = enabled;
     if (attr == gatt_aux_handle) s_aux_notify = enabled;
     if (attr == gatt_status_handle) s_status_notify = enabled;
     if (attr == gatt_battery_handle) s_battery_notify = enabled;
 }
 
-// bool gatt_imu_subscribed(void) { return s_imu_notify; }
+void gatt_clear_subscriptions(void)
+{
+    s_imu_notify = false;
+    s_imu_raw_notify = false;
+    s_aux_notify = false;
+    s_status_notify = false;
+    s_battery_notify = false;
+    SYSTEM_STATE_SET(imu_raw_subscribed, false);
+    SYSTEM_STATE_SET(aux_subscribed, false);
+}
+
+bool gatt_imu_subscribed(void) { return s_imu_notify; }
 bool gatt_imu_raw_subscribed(void) {
     system_state_t st;
     system_state_snapshot(&st);
     st.imu_raw_subscribed = s_imu_raw_notify;
-    system_state_replace(&st);
+    SYSTEM_STATE_SET(imu_raw_subscribed, st.imu_raw_subscribed);
+
     return s_imu_raw_notify; }
 bool gatt_aux_subscribed(void) {
     system_state_t st;
     system_state_snapshot(&st);
     st.aux_subscribed = s_aux_notify;
-    system_state_replace(&st);
+    SYSTEM_STATE_SET(aux_subscribed, st.aux_subscribed);
+
     return s_aux_notify; }
 bool gatt_status_subscribed(void) { return s_status_notify; }
 bool gatt_battery_subscribed(void) { return s_battery_notify; }

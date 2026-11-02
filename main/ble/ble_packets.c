@@ -13,6 +13,7 @@
 // _Static_assert(IMU_PACKET_Q30_SIZE == 28, "Unexpected Q30 packet size");
 // _Static_assert(IMU_PACKET_COMPACT_SIZE == 20,
 //                "Unexpected compact IMU packet size");
+_Static_assert(AUX_PACKET_V1_SIZE == 6 + 8 * 2, "Unexpected AUX packet size");
 _Static_assert(IMU_RAW_FULL_V1_SIZE == 36,
                "Unexpected full raw IMU packet size");
 _Static_assert(IMU_RAW_COMPACT_V2_SIZE == 20,
@@ -41,51 +42,46 @@ static void put_u32_le(uint8_t *p, uint32_t value)
     p[3] = (uint8_t)(value >> 24);
 }
 
-// static int16_t q30_to_q14(int32_t value)
-// {
-//     /*
-//      * Q30 to Q14 is a 16-bit right shift. Apply symmetric rounding before
-//      * shifting and saturate to int16_t.
-//      */
-//     int64_t rounded = value;
+static int16_t q30_to_q14(int32_t value)
+{
+    /*
+     * Q30 to Q14 is a 16-bit right shift. Apply symmetric rounding before
+     * shifting and saturate to int16_t.
+     */
+    int64_t rounded = value;
 
-//     if (rounded >= 0) {
-//         rounded += (1LL << 15);
-//     } else {
-//         rounded -= (1LL << 15);
-//     }
+    rounded = rounded >= 0 ? (rounded + (1LL << 15)) / (1LL << 16)
+                           : -((-rounded + (1LL << 15)) / (1LL << 16));
 
-//     rounded >>= 16;
+    if (rounded > INT16_MAX) {
+        rounded = INT16_MAX;
+    }
+    if (rounded < INT16_MIN) {
+        rounded = INT16_MIN;
+    }
 
-//     if (rounded > INT16_MAX) {
-//         rounded = INT16_MAX;
-//     }
-//     if (rounded < INT16_MIN) {
-//         rounded = INT16_MIN;
-//     }
-
-//     return (int16_t)rounded;
-// }
+    return (int16_t)rounded;
+}
 
 static uint8_t clamp_u8(uint32_t value)
 {
     return value > UINT8_MAX ? UINT8_MAX : (uint8_t)value;
 }
 
-// void ble_encode_imu_q30(
-//     uint8_t out[IMU_PACKET_Q30_SIZE],
-//     const imu_sample_t *sample)
-// {
-//     out[0] = IMU_PACKET_VERSION_Q30;
-//     out[1] = sample->flags;
-//     put_u16_le(out + 2, sample->accuracy);
-//     put_u32_le(out + 4, sample->sequence);
-//     put_u32_le(out + 8, sample->timestamp_ms);
-//     put_u32_le(out + 12, (uint32_t)sample->q0_q30);
-//     put_u32_le(out + 16, (uint32_t)sample->q1_q30);
-//     put_u32_le(out + 20, (uint32_t)sample->q2_q30);
-//     put_u32_le(out + 24, (uint32_t)sample->q3_q30);
-// }
+void ble_encode_imu_q30(
+    uint8_t out[IMU_PACKET_Q30_SIZE],
+    const imu_dmp_sample_t *sample)
+{
+    out[0] = IMU_PACKET_VERSION_Q30;
+    out[1] = sample->flags;
+    put_u16_le(out + 2, sample->accuracy);
+    put_u32_le(out + 4, sample->sequence);
+    put_u32_le(out + 8, sample->timestamp_ms);
+    put_u32_le(out + 12, (uint32_t)sample->q0_q30);
+    put_u32_le(out + 16, (uint32_t)sample->q1_q30);
+    put_u32_le(out + 20, (uint32_t)sample->q2_q30);
+    put_u32_le(out + 24, (uint32_t)sample->q3_q30);
+}
 
 void ble_encode_aux(uint8_t out[AUX_PACKET_V1_SIZE],
                     uint32_t ts, uint8_t sequence, const int16_t values[8])
@@ -117,76 +113,76 @@ size_t ble_encode_aux_for_mtu(
     ESP_LOGW("BLE PACKET", "MTU too small for aux packet: mtu=%u, att_payload=%zu, capacity=%zu", mtu, att_payload, capacity);
     return 0;
 }
-// void ble_encode_imu_compact(
-//     uint8_t out[IMU_PACKET_COMPACT_SIZE],
-//     const imu_sample_t *sample,
-//     uint8_t requested_rate_hz,
-//     uint8_t actual_rate_hz)
-// {
-//     /*
-//      * Version 2 compact packet:
-//      *
-//      *  0     u8     version = 2
-//      *  1     u8     flags
-//      *  2     u16    sequence, low 16 bits
-//      *  4     u32    timestamp_ms
-//      *  8     i16    q0 Q14
-//      * 10     i16    q1 Q14
-//      * 12     i16    q2 Q14
-//      * 14     i16    q3 Q14
-//      * 16     u16    accuracy
-//      * 18     u8     requested notification rate
-//      * 19     u8     measured sensor rate
-//      */
-//     out[0] = IMU_PACKET_VERSION_Q14_COMPACT;
-//     out[1] = sample->flags;
-//     put_u16_le(out + 2, (uint16_t)sample->sequence);
-//     put_u32_le(out + 4, sample->timestamp_ms);
-//     put_i16_le(out + 8, q30_to_q14(sample->q0_q30));
-//     put_i16_le(out + 10, q30_to_q14(sample->q1_q30));
-//     put_i16_le(out + 12, q30_to_q14(sample->q2_q30));
-//     put_i16_le(out + 14, q30_to_q14(sample->q3_q30));
-//     put_u16_le(out + 16, sample->accuracy);
-//     out[18] = requested_rate_hz;
-//     out[19] = actual_rate_hz;
-// }
+void ble_encode_imu_compact(
+    uint8_t out[IMU_PACKET_COMPACT_SIZE],
+    const imu_dmp_sample_t *sample,
+    uint8_t requested_rate_hz,
+    uint8_t actual_rate_hz)
+{
+    /*
+     * Version 2 compact packet:
+     *
+     *  0     u8     version = 2
+     *  1     u8     flags
+     *  2     u16    sequence, low 16 bits
+     *  4     u32    timestamp_ms
+     *  8     i16    q0 Q14
+     * 10     i16    q1 Q14
+     * 12     i16    q2 Q14
+     * 14     i16    q3 Q14
+     * 16     u16    accuracy
+     * 18     u8     requested notification rate
+     * 19     u8     measured sensor rate
+     */
+    out[0] = IMU_PACKET_VERSION_Q14_COMPACT;
+    out[1] = sample->flags;
+    put_u16_le(out + 2, (uint16_t)sample->sequence);
+    put_u32_le(out + 4, sample->timestamp_ms);
+    put_i16_le(out + 8, q30_to_q14(sample->q0_q30));
+    put_i16_le(out + 10, q30_to_q14(sample->q1_q30));
+    put_i16_le(out + 12, q30_to_q14(sample->q2_q30));
+    put_i16_le(out + 14, q30_to_q14(sample->q3_q30));
+    put_u16_le(out + 16, sample->accuracy);
+    out[18] = requested_rate_hz;
+    out[19] = actual_rate_hz;
+}
 
-// size_t ble_encode_imu_for_mtu(
-//     uint8_t *out,
-//     size_t capacity,
-//     uint16_t mtu,
-//     const imu_sample_t *sample)
-// {
-//     if (!out || !sample || mtu < 23) {
-//         return 0;
-//     }
+size_t ble_encode_imu_for_mtu(
+    uint8_t *out,
+    size_t capacity,
+    uint16_t mtu,
+    const imu_dmp_sample_t *sample)
+{
+    if (!out || !sample || mtu < 23) {
+        return 0;
+    }
 
-//     const size_t att_payload = (size_t)mtu - 3U;
+    const size_t att_payload = (size_t)mtu - 3U;
 
-//     if (att_payload >= IMU_PACKET_Q30_SIZE &&
-//         capacity >= IMU_PACKET_Q30_SIZE) {
-//         ble_encode_imu_q30(out, sample);
-//         return IMU_PACKET_Q30_SIZE;
-//     }
+    if (att_payload >= IMU_PACKET_Q30_SIZE &&
+        capacity >= IMU_PACKET_Q30_SIZE) {
+        ble_encode_imu_q30(out, sample);
+        return IMU_PACKET_Q30_SIZE;
+    }
 
-// #if CONFIG_BLE_COMPACT_PACKET_FALLBACK
-//     if (att_payload >= IMU_PACKET_COMPACT_SIZE &&
-//         capacity >= IMU_PACKET_COMPACT_SIZE) {
-//         system_state_t state;
-//         system_state_snapshot(&state);
+#if CONFIG_BLE_COMPACT_PACKET_FALLBACK
+    if (att_payload >= IMU_PACKET_COMPACT_SIZE &&
+        capacity >= IMU_PACKET_COMPACT_SIZE) {
+        system_state_t state;
+        system_state_snapshot(&state);
 
-//         ble_encode_imu_compact(
-//             out,
-//             sample,
-//             clamp_u8(state.requested_rate_hz),
-//             clamp_u8(state.actual_dmp_sample_rate_hz));
+        ble_encode_imu_compact(
+            out,
+            sample,
+            clamp_u8(state.requested_rate_hz),
+            clamp_u8(state.actual_dmp_sample_rate_hz));
 
-//         return IMU_PACKET_COMPACT_SIZE;
-//     }
-// #endif
+        return IMU_PACKET_COMPACT_SIZE;
+    }
+#endif
 
-//     return 0;
-// }
+    return 0;
+}
 
 void ble_encode_imu_raw_full(
     uint8_t packet[IMU_RAW_FULL_V1_SIZE],

@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 #include "esp_err.h"
 
 typedef enum {
@@ -64,5 +65,13 @@ typedef struct {
 
 esp_err_t system_state_init(void);
 void system_state_snapshot(system_state_t *out);
-void system_state_replace(const system_state_t *in);
+void system_state_write_field(size_t offset, const void *value, size_t size);
+void system_state_increment_counter(size_t offset);
+#define SYSTEM_STATE_SET(field, value) do { \
+    __typeof__(((system_state_t *)0)->field) state_value_ = (value); \
+    system_state_write_field(offsetof(system_state_t, field), \
+                             &state_value_, sizeof(state_value_)); \
+} while (0)
+#define SYSTEM_STATE_INCREMENT(field) \
+    system_state_increment_counter(offsetof(system_state_t, field))
 void system_state_set_error(const char *module, int32_t error);

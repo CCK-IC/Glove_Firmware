@@ -1,18 +1,19 @@
 {
-    "idf.currentSetup": "C:\\esp\\v6.1\\esp-idf",
-    "idf.openOcdConfigs": [
-        "board/esp32c3-builtin.cfg"
-    ],
-    "idf.customExtraVars": {
-        "IDF_TARGET": "esp32c3"
-    },
-    "clangd.path": "C:\\Espressif\\tools\\esp-clang\\esp-20.1.1_20250829\\esp-clang\\bin\\clangd.exe",
+    "C_Cpp.default.compilerPath": "${config:idf.buildPath}/compile_commands.json",
+    "clangd.path": "/Users/kt/.espressif/tools/esp-clangd/esp-21.1.3_20260408/esp-clangd/bin/clangd",
     "clangd.arguments": [
       "--background-index",
       "--query-driver=**",
-      "--compile-commands-dir=${config:idf.buildPath}/build"
+      "--compile-commands-dir=/Users/kt/Github_IC/Glove_Firmware/build"
     ],
     "idf.flashType": "JTAG",
-    "idf.port": "COM4",
-    "C_Cpp.default.compilerPath": "${config:idf.buildPath}/compile_commands.json"
+    "idf.port": "/dev/tty.usbmodem1101",
+    "idf.currentSetup": "/Users/kt/.espressif/v6.1/esp-idf",
+    "idf.openOcdConfigs": [
+      "board/esp32c3-builtin.cfg"
+    ],
+    "idf.customExtraVars": {
+      "OPENOCD_USB_ADAPTER_LOCATION": "0-1.1",
+      "IDF_TARGET": "esp32c3"
+    }
 }
