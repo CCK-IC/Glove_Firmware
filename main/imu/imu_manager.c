@@ -412,6 +412,7 @@ static void task_main(void *arg)
                 st.dropped_raw_samples++;
                 system_state_replace(&st);
             }
+        }
 #else
         }
 

@@ -62,31 +62,43 @@ mainmenu "Project configuration"
                 int "I2C SCL GPIO"
                 range 0 48
                 default 7
+                help
+                    DEFAULT: Xiao_C3[IO7/D5], Xiao_S3[IO6/D5] or [IO40/MTDO]
 
             config BOARD_I2C_SDA_GPIO
                 int "I2C SDA GPIO"
                 range 0 48
                 default 6
+                help
+                    DEFAULT: Xiao_C3[IO6/D5], Xiao_S3 [IO4/D5] or [IO41/MTDI]
 
             config BOARD_LED_GPIO
                 int "WS2812 data GPIO"
                 range 0 48
                 default 21
+                help
+                    DEFAULT: Xiao_C3[IO21/D6], Xiao_S3 [IO43/D6]
 
             config BOARD_BATTERY_ADC_GPIO
                 int "Battery ADC GPIO"
                 range 0 48
                 default 2
+                help
+                    DEFAULT: Xiao_C3[IO2/D0], Xiao_S3 [IO1/D0]
 
             config BOARD_BUTTON_GPIO
                 int "Button GPIO"
                 range 0 48
                 default 9
+                help
+                    DEFAULT: Xiao_C3[IO9/BOOT], Xiao_S3 [IO0/BOOT]
 
             config BOARD_POWER_HOLD_GPIO
                 int "Power-hold GPIO"
                 range 0 48
                 default 5
+                help
+                    DEFAULT: Xiao_C3[IO4/D3], Xiao_S3 [IO5/D3]
 
         endif
 
@@ -545,6 +557,7 @@ mainmenu "Project configuration"
     endmenu
 
     menu "ICM-20948 DMP Rate Policy"
+        depends on  IMU_DMP_ENABLED
 
         choice IMU_DMP_PROFILE
             prompt "DMP initialization profile"
