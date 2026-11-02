@@ -4,6 +4,5 @@
 /sdkconfig.old
 /dependencies.lock
 .favorites.json
-.vscode/*.local.json
-.vscode/settings.json
+/.vscode/
 /build_timeout_fix/
