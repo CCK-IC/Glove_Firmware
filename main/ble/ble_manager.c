@@ -1,8 +1,10 @@
 #include "ble_manager.h"
 
 #include <string.h>
+#include <stdio.h>
 #include "sdkconfig.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
 
@@ -102,6 +104,8 @@ static void maybe_request_connection_update(void)
     s_conn_update_attempted = true;
 
     int rc = ble_gap_update_params(s_conn, &params);
+    ESP_LOGI(TAG, "connection update request handle=%u rc=%d timeout=%u",
+             s_conn, rc, params.supervision_timeout);
     if (rc != 0) {
         /*
          * Connection-parameter rejection is recoverable and must not cause
@@ -160,7 +164,7 @@ static void advertise(void)
     system_state_t st;
     system_state_snapshot(&st);
     st.advertising = true;
-    system_state_replace(&st);
+    SYSTEM_STATE_SET(advertising, st.advertising);
 }
 
 static int gap_event(struct ble_gap_event *event, void *arg)
@@ -178,8 +182,10 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         if (event->connect.status != 0) {
             system_state_snapshot(&st);
             st.ble_connected = false;
+            SYSTEM_STATE_SET(ble_connected, st.ble_connected);
             st.advertising = false;
-            system_state_replace(&st);
+            SYSTEM_STATE_SET(advertising, st.advertising);
+
             advertise();
             return 0;
         }
@@ -187,15 +193,21 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         s_conn = event->connect.conn_handle;
 
         st.conn_handle = s_conn;
+        SYSTEM_STATE_SET(conn_handle, st.conn_handle);
         st.ble_connected = true;
+        SYSTEM_STATE_SET(ble_connected, st.ble_connected);
         st.advertising = false;
+        SYSTEM_STATE_SET(advertising, st.advertising);
         st.encrypted = false;
+        SYSTEM_STATE_SET(encrypted, st.encrypted);
         st.bonded = false;
+        SYSTEM_STATE_SET(bonded, st.bonded);
         st.mtu = ble_att_mtu(s_conn);
+        SYSTEM_STATE_SET(mtu, st.mtu);
         if (st.mtu < 23) {
             st.mtu = 23;
+            SYSTEM_STATE_SET(mtu, st.mtu);
         }
-        system_state_replace(&st);
 
         log_connection("connected", s_conn);
 
@@ -211,14 +223,16 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         }
     #endif
 
-        /*
-        * A delayed connection update is scheduled outside the GAP callback.
-        * Compatibility mode leaves it disabled.
-        */
+        /* Request a longer supervision timeout only when the peer's timeout
+         * is too short for service discovery on macOS. */
     #if CONFIG_BLE_REQUEST_CONNECTION_UPDATE
-        s_conn_update_due_us =
-            esp_timer_get_time() +
-            CONFIG_BLE_CONNECTION_UPDATE_DELAY_MS * 1000LL;
+        struct ble_gap_conn_desc connected_desc;
+        if (ble_gap_conn_find(s_conn, &connected_desc) == 0 &&
+            connected_desc.supervision_timeout < 200) {
+            s_conn_update_due_us =
+                esp_timer_get_time() +
+                CONFIG_BLE_CONNECTION_UPDATE_DELAY_MS * 1000LL;
+        }
     #endif
         return 0;
 
@@ -244,20 +258,35 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         s_conn = BLE_HS_CONN_HANDLE_NONE;
         s_conn_update_due_us = 0;
         s_conn_update_attempted = false;
+        gatt_clear_subscriptions();
 
         st.ble_connected = false;
+        SYSTEM_STATE_SET(ble_connected, st.ble_connected);
         st.encrypted = false;
+        SYSTEM_STATE_SET(encrypted, st.encrypted);
         st.bonded = false;
+        SYSTEM_STATE_SET(bonded, st.bonded);
         st.conn_handle = UINT16_MAX;
+        SYSTEM_STATE_SET(conn_handle, st.conn_handle);
         st.mtu = 23;
-        system_state_replace(&st);
+        SYSTEM_STATE_SET(mtu, st.mtu);
+        st.slow_mode = false;
+        SYSTEM_STATE_SET(slow_mode, st.slow_mode);
+        st.requested_rate_hz = APP_IMU_NORMAL_RATE_HZ;
+        SYSTEM_STATE_SET(requested_rate_hz, st.requested_rate_hz);
 
         advertise();
         return 0;
 
+    case BLE_GAP_EVENT_CONN_UPDATE:
+        ESP_LOGI(TAG, "connection update status=%d", event->conn_update.status);
+        log_connection("updated", event->conn_update.conn_handle);
+        return 0;
+
     case BLE_GAP_EVENT_ADV_COMPLETE:
         st.advertising = false;
-        system_state_replace(&st);
+        SYSTEM_STATE_SET(advertising, st.advertising);
+
         advertise();
         return 0;
 
@@ -268,7 +297,8 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_MTU:
         st.mtu = event->mtu.value;
-        system_state_replace(&st);
+        SYSTEM_STATE_SET(mtu, st.mtu);
+
         return 0;
 
     case BLE_GAP_EVENT_ENC_CHANGE: {
@@ -283,13 +313,15 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
         if (rc == 0) {
             st.encrypted = desc.sec_state.encrypted;
+            SYSTEM_STATE_SET(encrypted, st.encrypted);
             st.bonded = desc.sec_state.bonded;
+            SYSTEM_STATE_SET(bonded, st.bonded);
 
             if (event->enc_change.status == 0) {
                 st.pairing = false;
+                SYSTEM_STATE_SET(pairing, st.pairing);
             }
 
-            system_state_replace(&st);
             log_connection("security state", desc.conn_handle);
         }
 
@@ -324,8 +356,12 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_NOTIFY_TX:
         if (event->notify_tx.status != 0) {
-            st.dropped_notifications++;
-            system_state_replace(&st);
+            /* The caller already counts failed notification enqueues. */
+            static unsigned notify_tx_failures;
+            if (++notify_tx_failures <= 5 || notify_tx_failures % 100 == 0) {
+                ESP_LOGW(TAG, "notification TX failure status=%d count=%u",
+                         event->notify_tx.status, notify_tx_failures);
+            }
         }
         return 0;
 
@@ -406,7 +442,7 @@ static void notify_task(void *arg)
 
                 }
                 if (gatt_imu_subscribed()){                    
-                    imu_sample_t sample;
+                    imu_dmp_sample_t sample;
         
                     if (imu_manager_latest(&sample)) {
                         bool is_new =
@@ -430,8 +466,8 @@ static void notify_task(void *arg)
                                  * No compatible packet fits. Count once per new
                                  * sample rather than continuously retrying it.
                                  */
-                                state.dropped_notifications++;
-                                system_state_replace(&state);
+                                SYSTEM_STATE_INCREMENT(dropped_notifications);
+
                                 last_imu_sequence = sample.sequence;
                             } else {
                                 int rc = notify(
@@ -447,9 +483,8 @@ static void notify_task(void *arg)
                                      * Notification failure is recoverable. Do not
                                      * disconnect the peer.
                                      */
-                                    state.dropped_notifications++;
-                                    system_state_replace(&state);
-        
+                                    SYSTEM_STATE_INCREMENT(dropped_notifications);
+
                                     /*
                                      * Mark this sample consumed for deterministic
                                      * behavior. A later sample will be attempted.
@@ -462,7 +497,7 @@ static void notify_task(void *arg)
                 }
         }
 #endif
-#if CONFIG_IMU_RAW_ENABLED || 1
+#if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
         if (s_streaming &&
             state.ble_connected &&
             gatt_imu_raw_subscribed()) {
@@ -480,8 +515,8 @@ static void notify_task(void *arg)
                     &raw_sample);
 
                 if (length == 0) {
-                    state.dropped_notifications++;
-                    system_state_replace(&state);
+                    SYSTEM_STATE_INCREMENT(dropped_notifications);
+
                     last_raw_sequence = raw_sample.sequence;
                 } else {
                     int rc = notify(
@@ -490,8 +525,14 @@ static void notify_task(void *arg)
                         (uint16_t)length);
 
                     if (rc != 0) {
-                        state.dropped_notifications++;
-                        system_state_replace(&state);
+                        SYSTEM_STATE_INCREMENT(dropped_notifications);
+                        static unsigned raw_notify_failures;
+                        if (++raw_notify_failures <= 5 || raw_notify_failures % 100 == 0) {
+                            ESP_LOGW(TAG, "raw notification enqueue failure rc=%d count=%u",
+                                     rc, raw_notify_failures);
+                        }
+                    } else {
+                        sent_in_window++;
                     }
 
                     /*
@@ -519,8 +560,8 @@ static void notify_task(void *arg)
                     &adc_sample);
 
                 if (length == 0) {
-                    state.dropped_notifications++;
-                    system_state_replace(&state);
+                    SYSTEM_STATE_INCREMENT(dropped_notifications);
+
                     last_adc_sequence = adc_sample.sequence;
                 } else {
                     int rc = notify(
@@ -529,10 +570,10 @@ static void notify_task(void *arg)
                         (uint16_t)length);
 
                     if (rc != 0) {
-                        state.dropped_notifications++;
+                        SYSTEM_STATE_INCREMENT(dropped_notifications);
                         // TEST 
                         ESP_LOGW(TAG, "notify aux failed rc=%d", rc);
-                        system_state_replace(&state);
+
                     }
                     /*
                      * Consume each raw sample once. Notification errors are
@@ -544,13 +585,12 @@ static void notify_task(void *arg)
         }
 #endif
 
-
         uint64_t now_us = esp_timer_get_time();
 
         if (now_us - rate_window_us >= 1000000ULL) {
             system_state_snapshot(&state);
             state.actual_notify_rate_hz = sent_in_window;
-            system_state_replace(&state);
+            SYSTEM_STATE_SET(actual_notify_rate_hz, state.actual_notify_rate_hz);
 
             sent_in_window = 0;
             rate_window_us = now_us;
@@ -578,8 +618,7 @@ static void notify_task(void *arg)
                         (uint16_t)length);
 
                     if (rc != 0) {
-                        state.dropped_notifications++;
-                        system_state_replace(&state);
+                        SYSTEM_STATE_INCREMENT(dropped_notifications);
                     }
                 }
             }
@@ -595,8 +634,7 @@ static void notify_task(void *arg)
                 if (rc == 0) {
                     last_battery = state.battery_percent;
                 } else {
-                    state.dropped_notifications++;
-                    system_state_replace(&state);
+                    SYSTEM_STATE_INCREMENT(dropped_notifications);
                 }
             }
         }
@@ -644,8 +682,18 @@ esp_err_t ble_manager_init(void)
     int rc = gatt_server_init();
     if (rc) return ESP_FAIL;
 
-    rc = ble_svc_gap_device_name_set(APP_DEVICE_NAME);
+    uint8_t mac[6];
+    err = esp_read_mac(mac, ESP_MAC_BT);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Bluetooth MAC read failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    char device_name[sizeof(APP_DEVICE_NAME) + 5];
+    snprintf(device_name, sizeof(device_name), "%s-%02X%02X",
+             APP_DEVICE_NAME, mac[4], mac[5]);
+    rc = ble_svc_gap_device_name_set(device_name);
     if (rc) return ESP_FAIL;
+    ESP_LOGI(TAG, "Device name: %s", device_name);
 
     ble_store_config_init();
     return ESP_OK;
@@ -669,7 +717,7 @@ void ble_manager_start_pairing(void)
     system_state_t st;
     system_state_snapshot(&st);
     st.pairing = true;
-    system_state_replace(&st);
+    SYSTEM_STATE_SET(pairing, st.pairing);
 
     s_pairing_deadline = esp_timer_get_time() +
                          CONFIG_BLE_PAIRING_TIMEOUT_MS * 1000LL;
