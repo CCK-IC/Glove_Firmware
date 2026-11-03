@@ -66,9 +66,11 @@ void power_off_sequence(uint8_t reason)
     esp_err_t err = power_hold_release();
     if (err != ESP_OK)
         ESP_LOGE(TAG, "Could not release latch: %s", esp_err_to_name(err));
+    else 
+        ESP_LOGW(TAG, "Latch released; waiting for power to drop");
 #endif
 
-    vTaskDelay(pdMS_TO_TICKS(250));
+    vTaskDelay(pdMS_TO_TICKS(500));
     ESP_LOGW(TAG, "Power remains present; entering deep sleep fallback");
     esp_deep_sleep_start();
 

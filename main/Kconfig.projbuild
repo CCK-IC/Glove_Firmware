@@ -413,9 +413,18 @@ mainmenu "Project configuration"
             bool "Enable AUX ADC sampling (including dummy)"
             default y
 
+        config ADC_DUMMY
+            bool "Output generated ADC data in fetching stage by skipping actual ADC reading"
+            depends on AUX_ADC_ENABLED
+            default n
+            help
+                For development and testing, this option generates a dummy ADC value
+                instead of reading the actual ADC. The value is a sawtooth waveform
+                that cycles from 0 to 4095 (12-bit) over 10 seconds.
+
         choice ADC_ATTENUATION
             prompt "ADC attenuation"
-            depends on AUX_ADC_ENABLED
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY
             default ADC_ATTEN_12DB
 
             config ADC_ATTEN_0DB
@@ -428,7 +437,7 @@ mainmenu "Project configuration"
                 bool "12 dB"
 
         endchoice   
-
+        
         config ADC_WIDTH_BITS
             int "ADC width in bits"
             depends on AUX_ADC_ENABLED
@@ -443,15 +452,6 @@ mainmenu "Project configuration"
             help
                 Poll rate for ADC sampling.
 
-        config ADC_DUMMY
-            bool "Output generated ADC data in fetching stage by skipping actual ADC reading"
-            depends on AUX_ADC_ENABLED
-            default y
-            help
-                For development and testing, this option generates a dummy ADC value
-                instead of reading the actual ADC. The value is a sawtooth waveform
-                that cycles from 0 to 4095 (12-bit) over 10 seconds.
-
         config ADC_AVERAGE_SAMPLES
             int "Samples averaged per AUX channel"
             depends on AUX_ADC_ENABLED && !ADC_DUMMY
@@ -459,52 +459,52 @@ mainmenu "Project configuration"
             default 1
 
         config AUX_ADC_GPIO_0
-            int "AUX channel 0 GPIO (-1 = unconfigured)"
+            int "AUX channel 0 GPIO, IO2@S3(-1 = unconfigured)"
             depends on AUX_ADC_ENABLED && !ADC_DUMMY
             range -1 48
-            default -1
+            default 2
 
         config AUX_ADC_GPIO_1
-            int "AUX channel 1 GPIO (-1 = unconfigured)"
+            int "AUX channel 1 GPIO, IO3@S3(-1 = unconfigured)"
             depends on AUX_ADC_ENABLED && !ADC_DUMMY
             range -1 48
-            default -1
+            default 3
 
         config AUX_ADC_GPIO_2
-            int "AUX channel 2 GPIO (-1 = unconfigured)"
+            int "AUX channel 2 GPIO, IO4@S3(-1 = unconfigured)"
             depends on AUX_ADC_ENABLED && !ADC_DUMMY
             range -1 48
-            default -1
+            default 4
 
         config AUX_ADC_GPIO_3
-            int "AUX channel 3 GPIO (-1 = unconfigured)"
+            int "AUX channel 3 GPIO, IO5@S3 (-1 = unconfigured)"
             depends on AUX_ADC_ENABLED && !ADC_DUMMY
             range -1 48
-            default -1
+            default 5
 
         config AUX_ADC_GPIO_4
-            int "AUX channel 4 GPIO (-1 = unconfigured)"
+            int "AUX channel 4 GPIO, IO6@S3 (-1 = unconfigured)"
             depends on AUX_ADC_ENABLED && !ADC_DUMMY
             range -1 48
-            default -1
+            default 6
 
         config AUX_ADC_GPIO_5
-            int "AUX channel 5 GPIO (-1 = unconfigured)"
+            int "AUX channel 5 GPIO, IO7@S3 (-1 = unconfigured)"
             depends on AUX_ADC_ENABLED && !ADC_DUMMY
             range -1 48
-            default -1
+            default 7
 
         config AUX_ADC_GPIO_6
-            int "AUX channel 6 GPIO (-1 = unconfigured)"
+            int "AUX channel 6 GPIO, IO8@S3 (-1 = unconfigured)"
             depends on AUX_ADC_ENABLED && !ADC_DUMMY
             range -1 48
-            default -1
+            default 8
 
         config AUX_ADC_GPIO_7
-            int "AUX channel 7 GPIO (-1 = unconfigured)"
+            int "AUX channel 7 GPIO, IO9@S3 (-1 = unconfigured)"
             depends on AUX_ADC_ENABLED && !ADC_DUMMY
             range -1 48
-            default -1
+            default 9
 
     endmenu
 

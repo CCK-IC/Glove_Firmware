@@ -13,6 +13,7 @@
 #include "system_state.h"
 
 static const char *TAG = "battery";
+static adc_cali_scheme_ver_t scheme_ver;
 static adc_oneshot_unit_handle_t s_adc;
 static adc_cali_handle_t s_cali;
 static adc_channel_t s_channel;
