@@ -16,6 +16,7 @@ typedef enum {
 
 typedef struct {
     uint64_t boot_time_us;
+    uint64_t ble_disconnected_since_us;
     uint32_t requested_rate_hz;
     uint32_t actual_dmp_sample_rate_hz;
     uint32_t actual_notify_rate_hz;
@@ -65,6 +66,8 @@ typedef struct {
 
 esp_err_t system_state_init(void);
 void system_state_snapshot(system_state_t *out);
+void system_state_set_ble_connected(bool connected);
+bool system_state_claim_power_off(uint8_t reason, uint64_t disconnected_timeout_us);
 void system_state_write_field(size_t offset, const void *value, size_t size);
 void system_state_increment_counter(size_t offset);
 #define SYSTEM_STATE_SET(field, value) do { \

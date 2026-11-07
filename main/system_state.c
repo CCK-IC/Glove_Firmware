@@ -16,6 +16,7 @@ esp_err_t system_state_init(void)
 
     memset(&s_state, 0, sizeof(s_state));
     s_state.boot_time_us = esp_timer_get_time();
+    s_state.ble_disconnected_since_us = s_state.boot_time_us;
     s_state.requested_rate_hz = APP_IMU_NORMAL_RATE_HZ; //modded
     s_state.status_period_ms = CONFIG_BATTERY_STATUS_PERIOD_MS;
 #ifdef CONFIG_ADC_RATE_HZ
@@ -33,6 +34,34 @@ void system_state_snapshot(system_state_t *out)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     *out = s_state;
     xSemaphoreGive(s_lock);
+}
+
+void system_state_set_ble_connected(bool connected)
+{
+    if (!s_lock) return;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_state.ble_connected != connected) {
+        s_state.ble_connected = connected;
+        if (!connected) s_state.ble_disconnected_since_us = esp_timer_get_time();
+    }
+    xSemaphoreGive(s_lock);
+}
+
+bool system_state_claim_power_off(uint8_t reason, uint64_t disconnected_timeout_us)
+{
+    if (!s_lock) return false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool due = disconnected_timeout_us == 0 ||
+        (!s_state.ble_connected &&
+         (uint64_t)esp_timer_get_time() - s_state.ble_disconnected_since_us >=
+             disconnected_timeout_us);
+    bool claimed = due && !s_state.power_off_pending;
+    if (claimed) {
+        s_state.power_off_pending = true;
+        s_state.power_off_reason = reason;
+    }
+    xSemaphoreGive(s_lock);
+    return claimed;
 }
 
 void system_state_write_field(size_t offset, const void *value, size_t size)

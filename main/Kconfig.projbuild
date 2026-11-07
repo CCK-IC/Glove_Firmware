@@ -251,6 +251,15 @@ mainmenu "Project configuration"
 
     menu "Power Configuration"
 
+        config POWER_DISCONNECTED_TIMEOUT_SEC
+            int "Power off after BLE disconnect (seconds; 0 disables)"
+            range 0 86400
+            default 30
+            help
+                Power off after this many continuous seconds without a BLE
+                connection, including the initial disconnected period at boot.
+                Set to 0 to disable automatic power-off.
+
         config POWER_OFF_LED_MS
             int "Power-off LED indication time"
             range 100 10000

@@ -181,8 +181,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
         if (event->connect.status != 0) {
             system_state_snapshot(&st);
-            st.ble_connected = false;
-            SYSTEM_STATE_SET(ble_connected, st.ble_connected);
+            system_state_set_ble_connected(false);
             st.advertising = false;
             SYSTEM_STATE_SET(advertising, st.advertising);
 
@@ -194,8 +193,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
         st.conn_handle = s_conn;
         SYSTEM_STATE_SET(conn_handle, st.conn_handle);
-        st.ble_connected = true;
-        SYSTEM_STATE_SET(ble_connected, st.ble_connected);
+        system_state_set_ble_connected(true);
         st.advertising = false;
         SYSTEM_STATE_SET(advertising, st.advertising);
         st.encrypted = false;
@@ -260,8 +258,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         s_conn_update_attempted = false;
         gatt_clear_subscriptions();
 
-        st.ble_connected = false;
-        SYSTEM_STATE_SET(ble_connected, st.ble_connected);
+        system_state_set_ble_connected(false);
         st.encrypted = false;
         SYSTEM_STATE_SET(encrypted, st.encrypted);
         st.bonded = false;

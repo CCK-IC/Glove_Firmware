@@ -14,6 +14,33 @@
 #include "system_state.h"
 
 static const char *TAG = "power";
+static void power_off_execute(uint8_t reason);
+
+#if CONFIG_POWER_DISCONNECTED_TIMEOUT_SEC > 0
+static void disconnected_monitor_task(void *arg)
+{
+    (void)arg;
+    const uint64_t timeout_us = CONFIG_POWER_DISCONNECTED_TIMEOUT_SEC * 1000000ULL;
+    while (true) {
+        if (system_state_claim_power_off(3, timeout_us)) {
+            ESP_LOGW(TAG, "BLE disconnected for %u seconds; powering off",
+                     (unsigned)CONFIG_POWER_DISCONNECTED_TIMEOUT_SEC);
+            power_off_execute(3);
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+}
+#endif
+
+esp_err_t power_manager_start(void)
+{
+#if CONFIG_POWER_DISCONNECTED_TIMEOUT_SEC > 0
+    return xTaskCreate(disconnected_monitor_task, "power_monitor", 3072,
+                       NULL, 4, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+#else
+    return ESP_OK;
+#endif
+}
 
 esp_err_t power_manager_init(void)
 {
@@ -39,15 +66,12 @@ void power_off_request(uint8_t reason)
 
 void power_off_sequence(uint8_t reason)
 {
-    system_state_t st;
-    system_state_snapshot(&st);
-    if (st.power_off_pending) return;
+    if (!system_state_claim_power_off(reason, 0)) return;
+    power_off_execute(reason);
+}
 
-    st.power_off_pending = true;
-    SYSTEM_STATE_SET(power_off_pending, st.power_off_pending);
-    st.power_off_reason = reason;
-    SYSTEM_STATE_SET(power_off_reason, st.power_off_reason);
-
+static void power_off_execute(uint8_t reason)
+{
     ESP_LOGW(TAG, "Power-off sequence, reason=%u", reason);
     led_set_pattern(LED_PATTERN_POWER_OFF);
     vTaskDelay(pdMS_TO_TICKS(CONFIG_POWER_OFF_LED_MS));

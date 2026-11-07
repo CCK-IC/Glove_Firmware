@@ -16,7 +16,9 @@ static bool s_valid;
 static uint32_t s_sequence;
 #if CONFIG_AUX_ADC_ENABLED && !CONFIG_ADC_DUMMY
 static adc_oneshot_unit_handle_t s_units[8];
+static adc_cali_handle_t s_cali[8];
 static adc_channel_t s_channels[8];
+static bool s_calibrated[8];
 static const int s_pins[8] = {
     CONFIG_AUX_ADC_GPIO_0, CONFIG_AUX_ADC_GPIO_1,
     CONFIG_AUX_ADC_GPIO_2, CONFIG_AUX_ADC_GPIO_3,
@@ -123,6 +125,28 @@ esp_err_t adc_manager_init(void)
             .atten = attenuation(),
         };
         err = adc_oneshot_config_channel(s_units[i], s_channels[i], &cfg);
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+        adc_cali_curve_fitting_config_t cal = {
+            .unit_id = units[i],
+            .chan = s_channels[i],
+            .atten = attenuation(),
+            .bitwidth = ADC_BITWIDTH_DEFAULT,
+        };
+        s_calibrated[i] =
+            adc_cali_create_scheme_curve_fitting(&cal, &s_cali[i]) == ESP_OK;
+#elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+        adc_cali_line_fitting_config_t cal = {
+            .unit_id = units[i],
+            .atten = attenuation(),
+            .bitwidth = ADC_BITWIDTH_DEFAULT,
+            .default_vref = 0,
+        };
+        s_calibrated[i] =
+            adc_cali_create_scheme_line_fitting(&cal, &s_cali[i]) == ESP_OK;
+    #endif
+
+        if (!s_calibrated[i])
+            ESP_LOGW(TAG, "CH %u ADC calibration unavailable; voltage is approximate", i);
         if (err != ESP_OK) return err;
     }
 #else

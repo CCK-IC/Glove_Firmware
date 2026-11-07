@@ -146,6 +146,7 @@ void app_main(void)
     ESP_ERROR_CHECK(xTaskCreate(status_led_task, "status_led", 2048,
                                 NULL, 3, NULL) == pdPASS
                     ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(power_manager_start());
 
 #if CONFIG_TEST_LED
     led_set_pattern(LED_PATTERN_TEST);
