@@ -1,0 +1,2 @@
+# Preserve existing project configurations after correcting the option spelling.
+CONFIG_IMU_DMP_OVERIDE_RATE_HZ CONFIG_IMU_DMP_OVERRIDE_RATE_HZ

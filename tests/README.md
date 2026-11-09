@@ -4,12 +4,14 @@ Run `python3 tests/native/run.py` on macOS with a C compiler. This compiles the
 actual packet encoder and state manager with minimal host SDK shims, using
 AddressSanitizer and UndefinedBehaviorSanitizer. It checks AUX buffer guards,
 MTU/capacity boundaries, all eight channel fields, signed quaternion encoding,
-and two concurrent writers incrementing shared counters.
+two concurrent writers incrementing shared counters, disconnected shutdown
+deadlines, brief reconnections, and competing shutdown claims.
 
 After configuring an ESP-IDF build, run `python3 tests/check_configs.py`.
 It uses `build/compile_commands.json` and temporary sdkconfig headers to check
 application source syntax for the current configuration, real raw IMU, DMP with
-fallback, real ADC, and disabled sensors. It does not run Kconfig resolution,
+fallback, real ADC, dummy sensors, disabled power/diagnostics, and disabled
+sensors. It does not run Kconfig resolution,
 link alternate configurations, or establish that the test GPIOs are valid wiring.
 Run `cmake --build build` for the configured target's complete build.
 

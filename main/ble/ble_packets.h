@@ -83,27 +83,16 @@ typedef struct {
     uint32_t sequence;
     uint32_t timestamp_ms;
     int16_t values[8];
-    // int16_t adc1;
-    // int16_t adc2;
-    // int16_t adc3;
-    // int16_t adc4;
-    // int16_t adc5;
-    // int16_t adc6;
-    // int16_t adc7;
-    // int16_t adc8;
 } adc_sample_t;
 
-// // void ble_encode_imu(uint8_t out[APP_IMU_PACKET_SIZE],
-// //                     const imu_dmp_sample_t *sample);
-size_t ble_encode_aux_for_mtu(uint8_t *out, 
-    size_t capacity, 
+size_t ble_encode_aux_for_mtu(uint8_t *out,
+    size_t capacity,
     uint16_t mtu,
     const adc_sample_t *sample);
 
 void ble_encode_aux(uint8_t out[AUX_PACKET_V1_SIZE],
     uint32_t timestamp_ms, uint8_t sequence,
     const int16_t values[8]);
-void ble_encode_status(uint8_t out[APP_STATUS_SIZE]);
 
 void ble_encode_imu_q30(
     uint8_t out[IMU_PACKET_Q30_SIZE],
@@ -112,7 +101,7 @@ void ble_encode_imu_q30(
 void ble_encode_imu_compact(
     uint8_t out[IMU_PACKET_COMPACT_SIZE],
     const imu_dmp_sample_t *sample,
-    uint8_t requested_rate_hz,
+    uint8_t requested_imu_rate_hz,
     uint8_t actual_rate_hz);
 
 size_t ble_encode_imu_for_mtu(

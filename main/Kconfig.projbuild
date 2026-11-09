@@ -550,13 +550,13 @@ mainmenu "Project configuration"
                 Also enable CONFIG_ICM_20948_USE_DMP in the component menu.
         
         config IMU_DMP_DUMMY
-            bool "Output generated DMP data in fetching stage by skipping actual sensor reading"
+            bool "Generate synthetic quaternion samples"
             depends on !IMU_DMP_ENABLED
             default n
             help
                 For development and testing, this option generates dummy quaternion values
-                instead of reading the actual sensor. The values are a sawtooth waveform
-                that cycles from -1.0 to 1.0 over 10 seconds.
+                instead of reading the actual sensor. The quaternion rotates about
+                the Z axis over a 1000-sample cycle at the requested IMU rate.
         config IMU_DMP_RATE_HZ
             int "Normal acquisition/notification rate"
             depends on IMU_DMP_ENABLED || IMU_DMP_DUMMY
@@ -577,13 +577,13 @@ mainmenu "Project configuration"
                 acquisition task and exposes it through UUID_IMU_RAW.
         
         config IMU_RAW_DUMMY
-            bool "Output generated raw data in fetching stage by skipping actual sensor reading"
+            bool "Generate raw IMU test samples"
             depends on !IMU_RAW_ENABLED
             default n
             help
                 For development and testing, this option generates dummy AGMT values
-                instead of reading the actual sensor. The values are a sawtooth waveform
-                that cycles from -32768 to 32767 over 10 seconds.
+                instead of reading the actual sensor. All fields use a sawtooth
+                waveform from -32768 to 32767 over a 65536-sample cycle.
 
         config IMU_RAW_RATE_HZ
             int "Raw sensor acquisition rate"
@@ -651,8 +651,8 @@ mainmenu "Project configuration"
             help
                 Used for diagnostics and rate policy. Actual rate is measured at
                 runtime and remains authoritative.
-        config IMU_DMP_OVERIDE_RATE_HZ
-            int "Expected overide DMP output rate"
+        config IMU_DMP_OVERRIDE_RATE_HZ
+            int "Expected application override DMP output rate"
             depends on IMU_DMP_PROFILE_APPLICATION_OVERRIDE
             range 1 225
             default 112

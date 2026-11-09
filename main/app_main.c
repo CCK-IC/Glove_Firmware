@@ -18,13 +18,13 @@
 
 static const char *TAG = "app";
 
-static void event_task(void *arg)
+static void process_app_events(void *arg)
 {
     (void)arg;
     app_event_t event;
 
     while (xQueueReceive(app_events_queue(), &event, portMAX_DELAY) == pdTRUE) {
-        system_state_t st;
+        system_state_t state;
 
         switch (event.type) {
         case APP_EVENT_BUTTON_SINGLE:
@@ -32,27 +32,29 @@ static void event_task(void *arg)
             break;
 
         case APP_EVENT_BUTTON_DOUBLE:
-            system_state_snapshot(&st);
-            st.slow_mode = !st.slow_mode;
-            SYSTEM_STATE_SET(slow_mode, st.slow_mode);
-            st.requested_rate_hz = st.slow_mode ?
+            system_state_snapshot(&state);
+            state.slow_mode = !state.slow_mode;
+            SYSTEM_STATE_SET(slow_mode, state.slow_mode);
+            state.requested_imu_rate_hz = state.slow_mode ?
                 APP_IMU_SLOW_RATE_HZ : APP_IMU_NORMAL_RATE_HZ;
-            SYSTEM_STATE_SET(requested_rate_hz, st.requested_rate_hz);
+            SYSTEM_STATE_SET(requested_imu_rate_hz, state.requested_imu_rate_hz);
 
             led_set_pattern(LED_PATTERN_DEBUG_FLASH);
             ESP_LOGI(TAG, "Slow/debug mode=%d rate=%luHz",
-                     st.slow_mode,
-                     (unsigned long)st.requested_rate_hz);
+                     state.slow_mode,
+                     (unsigned long)state.requested_imu_rate_hz);
             break;
 
         case APP_EVENT_BUTTON_TRIPLE:
+            power_manager_request_shutdown(POWER_OFF_REASON_BUTTON);
+            break;
         case APP_EVENT_POWER_OFF:
-            power_off_request(event.value ? event.value : 1);
+            power_manager_request_shutdown(event.value ?
+                (power_off_reason_t)event.value : POWER_OFF_REASON_COMMAND);
             break;
 
         case APP_EVENT_BUTTON_HOLD:
             ble_manager_start_pairing();
-            led_set_pattern(LED_PATTERN_PAIRING);
             break;
 
         case APP_EVENT_PAIRING_TIMEOUT:
@@ -60,7 +62,7 @@ static void event_task(void *arg)
             break;
 
         case APP_EVENT_IMU_REINIT:
-            imu_manager_fifo_reinitialize();
+            imu_manager_reset_fifo();
             break;
 
         default:
@@ -69,33 +71,40 @@ static void event_task(void *arg)
     }
 }
 
-static void status_led_task(void *arg)
+static void update_status_led(void *arg)
 {
     (void)arg;
     bool last_connected = false;
-    bool last_low = false;
+    bool last_battery_low = false;
+    bool last_pairing = false;
 
     while (true) {
-        system_state_t st;
-        system_state_snapshot(&st);
+        system_state_t state;
+        system_state_snapshot(&state);
 
-        if (st.ble_connected != last_connected) {
+        if (state.ble_connected != last_connected) {
             led_clear_pattern(last_connected ?
                 LED_PATTERN_CONNECTED : LED_PATTERN_DISCONNECTED);
-            led_set_pattern(st.ble_connected ?
+            led_set_pattern(state.ble_connected ?
                 LED_PATTERN_CONNECTED : LED_PATTERN_DISCONNECTED);
-            last_connected = st.ble_connected;
+            last_connected = state.ble_connected;
         }
 
-        if (st.battery_low != last_low) {
-            if (st.battery_low)
+        if (state.battery_low != last_battery_low) {
+            if (state.battery_low)
                 led_set_pattern(LED_PATTERN_LOW_BATTERY);
             else
                 led_clear_pattern(LED_PATTERN_LOW_BATTERY);
-            last_low = st.battery_low;
+            last_battery_low = state.battery_low;
         }
 
-        if (!st.pairing) led_clear_pattern(LED_PATTERN_PAIRING);
+        if (state.pairing != last_pairing) {
+            if (state.pairing)
+                led_set_pattern(LED_PATTERN_PAIRING);
+            else
+                led_clear_pattern(LED_PATTERN_PAIRING);
+            last_pairing = state.pairing;
+        }
         vTaskDelay(pdMS_TO_TICKS(250));
     }
 }
@@ -129,6 +138,9 @@ void app_main(void)
         ESP_LOGE(TAG, "IMU initialization failed: %s", esp_err_to_name(err));
         system_state_set_error("imu", err);
 #if !CONFIG_IMU_SYNTHETIC_FALLBACK
+        /* Keep the disconnected shutdown active even when sensor startup fails.
+         * No acquisition/host tasks are running on this path. */
+        ESP_ERROR_CHECK(power_manager_start());
         return;
 #endif
     }
@@ -140,10 +152,10 @@ void app_main(void)
     ESP_ERROR_CHECK(button_manager_start());
     ESP_ERROR_CHECK(diagnostics_start());
 
-    ESP_ERROR_CHECK(xTaskCreate(event_task, "app_events", 3072,
+    ESP_ERROR_CHECK(xTaskCreate(process_app_events, "app_events", 3072,
                                 NULL, 6, NULL) == pdPASS
                     ? ESP_OK : ESP_ERR_NO_MEM);
-    ESP_ERROR_CHECK(xTaskCreate(status_led_task, "status_led", 2048,
+    ESP_ERROR_CHECK(xTaskCreate(update_status_led, "status_led", 2048,
                                 NULL, 3, NULL) == pdPASS
                     ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(power_manager_start());

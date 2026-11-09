@@ -17,9 +17,9 @@ typedef enum {
 typedef struct {
     uint64_t boot_time_us;
     uint64_t ble_disconnected_since_us;
-    uint32_t requested_rate_hz;
+    uint32_t requested_imu_rate_hz;
     uint32_t actual_dmp_sample_rate_hz;
-    uint32_t actual_notify_rate_hz;
+    uint32_t actual_imu_notify_rate_hz;
     uint32_t actual_raw_sample_rate_hz;
     uint32_t requested_adc_rate_hz;
     uint32_t actual_adc_sample_rate_hz;
@@ -49,8 +49,8 @@ typedef struct {
     uint8_t phy;
     imu_state_t imu_state;
 
-    uint32_t sample_count;
-    uint32_t dropped_samples;
+    uint32_t dmp_sample_count;
+    uint32_t dropped_dmp_samples;
     uint32_t dropped_notifications;
     uint32_t fifo_overflows;
     uint32_t i2c_errors;
@@ -67,7 +67,10 @@ typedef struct {
 esp_err_t system_state_init(void);
 void system_state_snapshot(system_state_t *out);
 void system_state_set_ble_connected(bool connected);
-bool system_state_claim_power_off(uint8_t reason, uint64_t disconnected_timeout_us);
+void system_state_update_battery(uint32_t millivolts, uint8_t percent, bool low);
+/* Atomically claim shutdown so concurrent requests cannot run it twice. */
+bool system_state_try_begin_shutdown(uint8_t reason);
+bool system_state_try_begin_disconnected_shutdown(uint8_t reason, uint64_t timeout_us);
 void system_state_write_field(size_t offset, const void *value, size_t size);
 void system_state_increment_counter(size_t offset);
 #define SYSTEM_STATE_SET(field, value) do { \

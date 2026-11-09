@@ -5,6 +5,7 @@
 #include "esp_idf_version.h"
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -14,43 +15,42 @@
 
 static const char *TAG = "diag";
 
-static void task_main(void *arg)
+#if CONFIG_DIAGNOSTICS_LOG_PERIOD_MS > 0
+static void diagnostics_log_task(void *arg)
 {
     (void)arg;
     while (true) {
-#if CONFIG_DIAGNOSTICS_LOG_PERIOD_MS > 0
-        system_state_t s;
-        system_state_snapshot(&s);
+        system_state_t state;
+        system_state_snapshot(&state);
         ESP_LOGI(TAG,
             "board=%s idf=%s ble=%d mtu=%u imu=%u dmp=%d "
             "dmp_notify=%s raw_notify=%s aux_notify=%s "
             "rate=%lu/%lu raw=%lu notify=%lu adc=%lu bat=%lumV/%u%% "
             "samples=%lu raw_samples=%lu adc_samples=%lu drop=%lu raw_drop=%lu "
             "i2c=%lu fifo=%lu heap=%lu led=%d",
-            board_name(), esp_get_idf_version(), s.ble_connected, s.mtu,s.imu_state, s.imu_dmp,
-            s.imu_dmp_subscribed ? "T" : "F",
-            s.imu_raw_subscribed ? "T" : "F",
-            s.aux_subscribed ? "T" : "F",
-            (unsigned long)s.requested_rate_hz,
-            (unsigned long)s.actual_dmp_sample_rate_hz,
-            (unsigned long)s.actual_raw_sample_rate_hz,
-            (unsigned long)s.actual_notify_rate_hz,
-            (unsigned long)s.actual_adc_sample_rate_hz,
-            (unsigned long)s.battery_mv, s.battery_percent,
-            (unsigned long)s.sample_count,
-            (unsigned long)s.raw_sample_count,
-            (unsigned long)s.adc_sample_count,
-            (unsigned long)s.dropped_notifications,
-            (unsigned long)s.dropped_raw_samples,
-            (unsigned long)s.i2c_errors,
-            (unsigned long)s.fifo_overflows,
+            board_name(), esp_get_idf_version(), state.ble_connected, state.mtu,state.imu_state, state.imu_dmp,
+            state.imu_dmp_subscribed ? "T" : "F",
+            state.imu_raw_subscribed ? "T" : "F",
+            state.aux_subscribed ? "T" : "F",
+            (unsigned long)state.requested_imu_rate_hz,
+            (unsigned long)state.actual_dmp_sample_rate_hz,
+            (unsigned long)state.actual_raw_sample_rate_hz,
+            (unsigned long)state.actual_imu_notify_rate_hz,
+            (unsigned long)state.actual_adc_sample_rate_hz,
+            (unsigned long)state.battery_mv, state.battery_percent,
+            (unsigned long)state.dmp_sample_count,
+            (unsigned long)state.raw_sample_count,
+            (unsigned long)state.adc_sample_count,
+            (unsigned long)state.dropped_notifications,
+            (unsigned long)state.dropped_raw_samples,
+            (unsigned long)state.i2c_errors,
+            (unsigned long)state.fifo_overflows,
             (unsigned long)esp_get_free_heap_size(),
             led_get_current_pattern());
-#endif
-        vTaskDelay(pdMS_TO_TICKS(CONFIG_DIAGNOSTICS_LOG_PERIOD_MS ?
-                                CONFIG_DIAGNOSTICS_LOG_PERIOD_MS : 60000));
+        vTaskDelay(pdMS_TO_TICKS(CONFIG_DIAGNOSTICS_LOG_PERIOD_MS));
     }
 }
+#endif
 
 esp_err_t diagnostics_start(void)
 {
@@ -59,39 +59,13 @@ esp_err_t diagnostics_start(void)
     ESP_LOGI(TAG, "IDF=%s board=%s cores=%u revision=%u BLE-only firmware",
              esp_get_idf_version(), board_name(), info.cores, info.revision);
 
-    return xTaskCreate(task_main, "diagnostics", 3072,
+#if CONFIG_DIAGNOSTICS_LOG_PERIOD_MS > 0
+    return xTaskCreate(diagnostics_log_task, "diagnostics", 3072,
                        NULL, 2, NULL) == pdPASS
         ? ESP_OK : ESP_ERR_NO_MEM;
+#else
+    return ESP_OK;
+#endif
 }
 
-/* 
-DOC
-The values can be categorized in to System(``SYS``), Bluetooth(``BLE``),Sensor(``SEN``)
-|Type|fString|sVariable|Meaning|
-|:--:|--|--|-|
-| SYS | board | ``board_name()`` |Hardware Info|
-| SYS | idf | ``esp_get_idf_version()`` |Firmware Info|
-| BLE | ble | ``s.ble_connected`` | Bluetooth connected|
-| BLE | mtu | ``s.mtu`` | Handshaked Max packet size|
-| SEN | imu | ``s.imu_state`` | IMU state|
-| SEN | dmp | ``s.imu_dmp`` | DMP enabled|
-| BLE | dmp_notify | ``s.imu_dmp_subscribed`` | DMP notification subscribed|
-| BLE | raw_notify | ``s.imu_raw_subscribed`` | Raw notification subscribed|
-| BLE | aux_notify | ``s.aux_subscribed`` | Aux(ADC) notification subscribed|
-| BLE | rate | ``s.requested_rate_hz`` | Requested notification rate|
-| SEN | dmp | ``s.actual_dmp_sample_rate_hz`` | Actual DMP sample rate|
-| SEN | raw | ``s.actual_raw_sample_rate_hz`` | Actual Raw sample rate|
-| BLE | notify | ``s.actual_notify_rate_hz`` | Actual notification sample rate|
-| SEN | adc | ``s.actual_adc_sample_rate_hz`` | Actual ADC sample rate|
-| SYS | bat | ``s.battery_mv``, ``s.battery_percent`` | Battery voltage and level|
-| BLE | sample | ``s.sample_count`` | *th DMP sample sent|
-| BLE | raw_sample | ``s.raw_sample_count`` | *th Raw sample sent|
-| BLE | adc_sample | ``s.adc_sample_count`` | *th ADC sample sent|
-| BLE | drop | ``s.dropped_notifications`` | # of dropped DMP sample|
-| BLE | raw_drop | ``s.dropped_raw_samples`` | # of dropped Raw sample|
-| SEN | i2c | ``s.i2c_errors`` | IMU missed poll due to I2C error|
-| SEN | fifio | ``s.fifo_overflows`` | IMU missed poll due to FIFO error|
-| SYS | heap | ``esp_get_free_heap_size()`` | Memory blocks avaliable in ESP|
-| SYS | led | ``led_get_current_pattern()`` | External LED pattern|
-
-*/
+/* Log field descriptions and sample output are maintained in SerialMSG.md. */

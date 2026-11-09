@@ -10,9 +10,9 @@
 #include "system_state.h"
 #include "app_config.h"
 
-// _Static_assert(IMU_PACKET_Q30_SIZE == 28, "Unexpected Q30 packet size");
-// _Static_assert(IMU_PACKET_COMPACT_SIZE == 20,
-//                "Unexpected compact IMU packet size");
+_Static_assert(IMU_PACKET_Q30_SIZE == 28, "Unexpected Q30 packet size");
+_Static_assert(IMU_PACKET_COMPACT_SIZE == 20,
+               "Unexpected compact IMU packet size");
 _Static_assert(AUX_PACKET_V1_SIZE == 6 + 8 * 2, "Unexpected AUX packet size");
 _Static_assert(IMU_RAW_FULL_V1_SIZE == 36,
                "Unexpected full raw IMU packet size");
@@ -84,22 +84,21 @@ void ble_encode_imu_q30(
 }
 
 void ble_encode_aux(uint8_t out[AUX_PACKET_V1_SIZE],
-                    uint32_t ts, uint8_t sequence, const int16_t values[8])
+                    uint32_t timestamp_ms, uint8_t sequence, const int16_t values[8])
 {
     out[0] = AUX_PACKET_VERSION;
     out[1] = sequence;
-    put_u32_le(out + 2, ts);
+    put_u32_le(out + 2, timestamp_ms);
     for (int i = 0; i < 8; ++i) put_i16_le(out + 6 + i * 2, values[i]);
 }
 
 size_t ble_encode_aux_for_mtu(
-    uint8_t *out, 
-    size_t capacity, 
+    uint8_t *out,
+    size_t capacity,
     uint16_t mtu,
     const adc_sample_t *sample)
 {
     if (!out || !sample || mtu < 23) {
-        ESP_LOGE("BLE PACKET", "Invalid parameters for aux packet encoding");
         return 0;
     }
 
@@ -110,13 +109,12 @@ size_t ble_encode_aux_for_mtu(
         ble_encode_aux(out, sample->timestamp_ms, sample->sequence, sample->values);
         return AUX_PACKET_V1_SIZE;
     }
-    ESP_LOGW("BLE PACKET", "MTU too small for aux packet: mtu=%u, att_payload=%zu, capacity=%zu", mtu, att_payload, capacity);
     return 0;
 }
 void ble_encode_imu_compact(
     uint8_t out[IMU_PACKET_COMPACT_SIZE],
     const imu_dmp_sample_t *sample,
-    uint8_t requested_rate_hz,
+    uint8_t requested_imu_rate_hz,
     uint8_t actual_rate_hz)
 {
     /*
@@ -143,7 +141,7 @@ void ble_encode_imu_compact(
     put_i16_le(out + 12, q30_to_q14(sample->q2_q30));
     put_i16_le(out + 14, q30_to_q14(sample->q3_q30));
     put_u16_le(out + 16, sample->accuracy);
-    out[18] = requested_rate_hz;
+    out[18] = requested_imu_rate_hz;
     out[19] = actual_rate_hz;
 }
 
@@ -174,7 +172,7 @@ size_t ble_encode_imu_for_mtu(
         ble_encode_imu_compact(
             out,
             sample,
-            clamp_u8(state.requested_rate_hz),
+            clamp_u8(state.requested_imu_rate_hz),
             clamp_u8(state.actual_dmp_sample_rate_hz));
 
         return IMU_PACKET_COMPACT_SIZE;
@@ -317,9 +315,9 @@ void ble_encode_status_full(
 
     put_u32_le(out + 4,
                (uint32_t)(esp_timer_get_time() / 1000ULL));
-    put_u16_le(out + 8, (uint16_t)state.requested_rate_hz);
+    put_u16_le(out + 8, (uint16_t)state.requested_imu_rate_hz);
     put_u16_le(out + 10, (uint16_t)state.actual_dmp_sample_rate_hz);
-    put_u16_le(out + 12, (uint16_t)state.actual_notify_rate_hz);
+    put_u16_le(out + 12, (uint16_t)state.actual_imu_notify_rate_hz);
     put_u16_le(out + 14, (uint16_t)state.status_period_ms);
     put_u16_le(out + 16, (uint16_t)state.battery_mv);
 
@@ -330,8 +328,8 @@ void ble_encode_status_full(
     put_u16_le(out + 22, state.conn_handle);
     put_u32_le(out + 24, esp_get_free_heap_size());
     put_u32_le(out + 28, esp_get_minimum_free_heap_size());
-    put_u32_le(out + 32, state.sample_count);
-    put_u32_le(out + 36, state.dropped_samples);
+    put_u32_le(out + 32, state.dmp_sample_count);
+    put_u32_le(out + 36, state.dropped_dmp_samples);
     put_u32_le(out + 40, state.dropped_notifications);
     put_u32_le(out + 44, state.fifo_overflows);
     put_u32_le(out + 48, state.i2c_errors);
@@ -365,9 +363,9 @@ void ble_encode_status_compact(
 
     put_u32_le(out + 2,
                (uint32_t)(esp_timer_get_time() / 1000ULL));
-    put_u16_le(out + 6, (uint16_t)state.requested_rate_hz);
+    put_u16_le(out + 6, (uint16_t)state.requested_imu_rate_hz);
     put_u16_le(out + 8, (uint16_t)state.actual_dmp_sample_rate_hz);
-    put_u16_le(out + 10, (uint16_t)state.actual_notify_rate_hz);
+    put_u16_le(out + 10, (uint16_t)state.actual_imu_notify_rate_hz);
     put_u16_le(out + 12, (uint16_t)state.battery_mv);
 
     out[14] = state.battery_percent;

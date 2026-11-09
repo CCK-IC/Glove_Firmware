@@ -17,7 +17,7 @@ esp_err_t system_state_init(void)
     memset(&s_state, 0, sizeof(s_state));
     s_state.boot_time_us = esp_timer_get_time();
     s_state.ble_disconnected_since_us = s_state.boot_time_us;
-    s_state.requested_rate_hz = APP_IMU_NORMAL_RATE_HZ; //modded
+    s_state.requested_imu_rate_hz = APP_IMU_NORMAL_RATE_HZ;
     s_state.status_period_ms = CONFIG_BATTERY_STATUS_PERIOD_MS;
 #ifdef CONFIG_ADC_RATE_HZ
     s_state.requested_adc_rate_hz = CONFIG_ADC_RATE_HZ;
@@ -47,7 +47,18 @@ void system_state_set_ble_connected(bool connected)
     xSemaphoreGive(s_lock);
 }
 
-bool system_state_claim_power_off(uint8_t reason, uint64_t disconnected_timeout_us)
+void system_state_update_battery(uint32_t millivolts, uint8_t percent, bool low)
+{
+    if (!s_lock) return;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_state.battery_mv = millivolts;
+    s_state.battery_percent = percent;
+    s_state.battery_low = low;
+    s_state.battery_error = false;
+    xSemaphoreGive(s_lock);
+}
+
+static bool try_begin_shutdown(uint8_t reason, uint64_t disconnected_timeout_us)
 {
     if (!s_lock) return false;
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -62,6 +73,17 @@ bool system_state_claim_power_off(uint8_t reason, uint64_t disconnected_timeout_
     }
     xSemaphoreGive(s_lock);
     return claimed;
+}
+
+bool system_state_try_begin_shutdown(uint8_t reason)
+{
+    return try_begin_shutdown(reason, 0);
+}
+
+bool system_state_try_begin_disconnected_shutdown(uint8_t reason, uint64_t timeout_us)
+{
+    /* Zero disables the disconnected timer; it must not claim a manual shutdown. */
+    return timeout_us > 0 && try_begin_shutdown(reason, timeout_us);
 }
 
 void system_state_write_field(size_t offset, const void *value, size_t size)

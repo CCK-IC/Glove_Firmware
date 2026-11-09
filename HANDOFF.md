@@ -1,5 +1,9 @@
 # Firmware handoff
 
+For the subsequent refactor and current review findings, see
+[REFACTOR_REVIEW.md](REFACTOR_REVIEW.md). The snapshot below records the
+pre-refactor history and validation results.
+
 Snapshot prepared 2026-11-07. This document describes the history through
 `4a2dcc6` and the changes committed alongside this handoff. Git history remains
 the authoritative record of exact changes and merge ancestry.

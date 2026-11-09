@@ -2,11 +2,15 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -17,6 +21,7 @@
 #include "services/gap/ble_svc_gap.h"
 
 #include "app_config.h"
+#include "app_events.h"
 #include "system_state.h"
 #include "imu/imu_manager.h"
 #include "adc/adc_manager.h"
@@ -27,12 +32,15 @@
 void ble_store_config_init(void);
 
 static const char *TAG = "ble";
-static uint8_t s_addr_type;
-static uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
-static volatile bool s_streaming = true;
-static int64_t s_pairing_deadline;
-static int64_t s_conn_update_due_us;
-static bool s_conn_update_attempted;
+static uint8_t s_address_type;
+/* Host callbacks and the notification task share this connection metadata. */
+static SemaphoreHandle_t s_connection_lock;
+static uint16_t s_connection_handle = BLE_HS_CONN_HANDLE_NONE;
+static atomic_bool s_notifications_enabled = true;
+static atomic_uint s_connection_generation;
+static int64_t s_pairing_deadline_us;
+static int64_t s_connection_update_due_us;
+static bool s_connection_update_attempted;
 
 static const char *hci_reason_name(int reason)
 {
@@ -84,12 +92,18 @@ static void log_connection(
 static void maybe_request_connection_update(void)
 {
 #if CONFIG_BLE_REQUEST_CONNECTION_UPDATE
-    if (s_conn == BLE_HS_CONN_HANDLE_NONE ||
-        s_conn_update_attempted ||
-        s_conn_update_due_us == 0 ||
-        esp_timer_get_time() < s_conn_update_due_us) {
+    int64_t now_us = esp_timer_get_time();
+    xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+    uint16_t connection_handle = s_connection_handle;
+    if (connection_handle == BLE_HS_CONN_HANDLE_NONE ||
+        s_connection_update_attempted ||
+        s_connection_update_due_us == 0 ||
+        now_us < s_connection_update_due_us) {
+        xSemaphoreGive(s_connection_lock);
         return;
     }
+    s_connection_update_attempted = true;
+    xSemaphoreGive(s_connection_lock);
 
     struct ble_gap_upd_params params = {
         .itvl_min = CONFIG_BLE_CONN_INTERVAL_MIN_UNITS,
@@ -101,11 +115,9 @@ static void maybe_request_connection_update(void)
         .max_ce_len = 0,
     };
 
-    s_conn_update_attempted = true;
-
-    int rc = ble_gap_update_params(s_conn, &params);
+    int rc = ble_gap_update_params(connection_handle, &params);
     ESP_LOGI(TAG, "connection update request handle=%u rc=%d timeout=%u",
-             s_conn, rc, params.supervision_timeout);
+             connection_handle, rc, params.supervision_timeout);
     if (rc != 0) {
         /*
          * Connection-parameter rejection is recoverable and must not cause
@@ -118,9 +130,9 @@ static void maybe_request_connection_update(void)
 #endif
 }
 
-static int gap_event(struct ble_gap_event *event, void *arg);
+static int handle_gap_event(struct ble_gap_event *event, void *arg);
 
-static void advertise(void)
+static void start_advertising(void)
 {
     if (ble_gap_adv_active()) return;
 
@@ -154,24 +166,24 @@ static void advertise(void)
         .conn_mode = BLE_GAP_CONN_MODE_UND,
         .disc_mode = BLE_GAP_DISC_MODE_GEN,
     };
-    rc = ble_gap_adv_start(s_addr_type, NULL, BLE_HS_FOREVER,
-                           &p, gap_event, NULL);
+    rc = ble_gap_adv_start(s_address_type, NULL, BLE_HS_FOREVER,
+                           &p, handle_gap_event, NULL);
     if (rc) {
         ESP_LOGE(TAG, "adv start rc=%d", rc);
         return;
     }
 
-    system_state_t st;
-    system_state_snapshot(&st);
-    st.advertising = true;
-    SYSTEM_STATE_SET(advertising, st.advertising);
+    system_state_t state;
+    system_state_snapshot(&state);
+    state.advertising = true;
+    SYSTEM_STATE_SET(advertising, state.advertising);
 }
 
-static int gap_event(struct ble_gap_event *event, void *arg)
+static int handle_gap_event(struct ble_gap_event *event, void *arg)
 {
     (void)arg;
-    system_state_t st;
-    system_state_snapshot(&st);
+    system_state_t state;
+    system_state_snapshot(&state);
 
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
@@ -180,38 +192,42 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                 event->connect.conn_handle);
 
         if (event->connect.status != 0) {
-            system_state_snapshot(&st);
+            system_state_snapshot(&state);
             system_state_set_ble_connected(false);
-            st.advertising = false;
-            SYSTEM_STATE_SET(advertising, st.advertising);
+            state.advertising = false;
+            SYSTEM_STATE_SET(advertising, state.advertising);
 
-            advertise();
+            start_advertising();
             return 0;
         }
 
-        s_conn = event->connect.conn_handle;
+        xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+        s_connection_handle = event->connect.conn_handle;
+        s_connection_update_due_us = 0;
+        s_connection_update_attempted = false;
+        xSemaphoreGive(s_connection_lock);
 
-        st.conn_handle = s_conn;
-        SYSTEM_STATE_SET(conn_handle, st.conn_handle);
+        state.conn_handle = event->connect.conn_handle;
+        SYSTEM_STATE_SET(conn_handle, state.conn_handle);
         system_state_set_ble_connected(true);
-        st.advertising = false;
-        SYSTEM_STATE_SET(advertising, st.advertising);
-        st.encrypted = false;
-        SYSTEM_STATE_SET(encrypted, st.encrypted);
-        st.bonded = false;
-        SYSTEM_STATE_SET(bonded, st.bonded);
-        st.mtu = ble_att_mtu(s_conn);
-        SYSTEM_STATE_SET(mtu, st.mtu);
-        if (st.mtu < 23) {
-            st.mtu = 23;
-            SYSTEM_STATE_SET(mtu, st.mtu);
+        state.advertising = false;
+        SYSTEM_STATE_SET(advertising, state.advertising);
+        state.encrypted = false;
+        SYSTEM_STATE_SET(encrypted, state.encrypted);
+        state.bonded = false;
+        SYSTEM_STATE_SET(bonded, state.bonded);
+        state.mtu = ble_att_mtu(event->connect.conn_handle);
+        SYSTEM_STATE_SET(mtu, state.mtu);
+        if (state.mtu < 23) {
+            state.mtu = 23;
+            SYSTEM_STATE_SET(mtu, state.mtu);
         }
 
-        log_connection("connected", s_conn);
+        log_connection("connected", event->connect.conn_handle);
 
     #if CONFIG_BLE_INITIATE_SECURITY_ON_CONNECT
         {
-            int rc = ble_gap_security_initiate(s_conn);
+            int rc = ble_gap_security_initiate(event->connect.conn_handle);
             if (rc != 0) {
                 ESP_LOGW(TAG,
                         "security initiation rejected rc=%d; "
@@ -225,13 +241,16 @@ static int gap_event(struct ble_gap_event *event, void *arg)
          * is too short for service discovery on macOS. */
     #if CONFIG_BLE_REQUEST_CONNECTION_UPDATE
         struct ble_gap_conn_desc connected_desc;
-        if (ble_gap_conn_find(s_conn, &connected_desc) == 0 &&
+        if (ble_gap_conn_find(event->connect.conn_handle, &connected_desc) == 0 &&
             connected_desc.supervision_timeout < 200) {
-            s_conn_update_due_us =
+            xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+            s_connection_update_due_us =
                 esp_timer_get_time() +
                 CONFIG_BLE_CONNECTION_UPDATE_DELAY_MS * 1000LL;
+            xSemaphoreGive(s_connection_lock);
         }
     #endif
+        atomic_fetch_add(&s_connection_generation, 1);
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
@@ -253,26 +272,28 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                 event->disconnect.conn.sec_state.bonded);
     #endif
 
-        s_conn = BLE_HS_CONN_HANDLE_NONE;
-        s_conn_update_due_us = 0;
-        s_conn_update_attempted = false;
+        xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+        s_connection_handle = BLE_HS_CONN_HANDLE_NONE;
+        s_connection_update_due_us = 0;
+        s_connection_update_attempted = false;
+        xSemaphoreGive(s_connection_lock);
         gatt_clear_subscriptions();
 
         system_state_set_ble_connected(false);
-        st.encrypted = false;
-        SYSTEM_STATE_SET(encrypted, st.encrypted);
-        st.bonded = false;
-        SYSTEM_STATE_SET(bonded, st.bonded);
-        st.conn_handle = UINT16_MAX;
-        SYSTEM_STATE_SET(conn_handle, st.conn_handle);
-        st.mtu = 23;
-        SYSTEM_STATE_SET(mtu, st.mtu);
-        st.slow_mode = false;
-        SYSTEM_STATE_SET(slow_mode, st.slow_mode);
-        st.requested_rate_hz = APP_IMU_NORMAL_RATE_HZ;
-        SYSTEM_STATE_SET(requested_rate_hz, st.requested_rate_hz);
+        state.encrypted = false;
+        SYSTEM_STATE_SET(encrypted, state.encrypted);
+        state.bonded = false;
+        SYSTEM_STATE_SET(bonded, state.bonded);
+        state.conn_handle = UINT16_MAX;
+        SYSTEM_STATE_SET(conn_handle, state.conn_handle);
+        state.mtu = 23;
+        SYSTEM_STATE_SET(mtu, state.mtu);
+        state.slow_mode = false;
+        SYSTEM_STATE_SET(slow_mode, state.slow_mode);
+        state.requested_imu_rate_hz = APP_IMU_NORMAL_RATE_HZ;
+        SYSTEM_STATE_SET(requested_imu_rate_hz, state.requested_imu_rate_hz);
 
-        advertise();
+        start_advertising();
         return 0;
 
     case BLE_GAP_EVENT_CONN_UPDATE:
@@ -281,10 +302,10 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
-        st.advertising = false;
-        SYSTEM_STATE_SET(advertising, st.advertising);
+        state.advertising = false;
+        SYSTEM_STATE_SET(advertising, state.advertising);
 
-        advertise();
+        start_advertising();
         return 0;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
@@ -293,8 +314,8 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_MTU:
-        st.mtu = event->mtu.value;
-        SYSTEM_STATE_SET(mtu, st.mtu);
+        state.mtu = event->mtu.value;
+        SYSTEM_STATE_SET(mtu, state.mtu);
 
         return 0;
 
@@ -309,14 +330,17 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             event->enc_change.conn_handle, &desc);
 
         if (rc == 0) {
-            st.encrypted = desc.sec_state.encrypted;
-            SYSTEM_STATE_SET(encrypted, st.encrypted);
-            st.bonded = desc.sec_state.bonded;
-            SYSTEM_STATE_SET(bonded, st.bonded);
+            state.encrypted = desc.sec_state.encrypted;
+            SYSTEM_STATE_SET(encrypted, state.encrypted);
+            state.bonded = desc.sec_state.bonded;
+            SYSTEM_STATE_SET(bonded, state.bonded);
 
             if (event->enc_change.status == 0) {
-                st.pairing = false;
-                SYSTEM_STATE_SET(pairing, st.pairing);
+                xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+                s_pairing_deadline_us = 0;
+                state.pairing = false;
+                SYSTEM_STATE_SET(pairing, state.pairing);
+                xSemaphoreGive(s_connection_lock);
             }
 
             log_connection("security state", desc.conn_handle);
@@ -370,6 +394,20 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 static void on_reset(int reason)
 {
     ESP_LOGE(TAG, "NimBLE reset reason=%d", reason);
+    xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+    s_connection_handle = BLE_HS_CONN_HANDLE_NONE;
+    s_connection_update_due_us = 0;
+    s_connection_update_attempted = false;
+    s_pairing_deadline_us = 0;
+    xSemaphoreGive(s_connection_lock);
+    system_state_set_ble_connected(false);
+    SYSTEM_STATE_SET(conn_handle, UINT16_MAX);
+    SYSTEM_STATE_SET(mtu, 23);
+    SYSTEM_STATE_SET(advertising, false);
+    SYSTEM_STATE_SET(encrypted, false);
+    SYSTEM_STATE_SET(bonded, false);
+    SYSTEM_STATE_SET(pairing, false);
+    gatt_clear_subscriptions();
 }
 
 static void on_sync(void)
@@ -379,12 +417,12 @@ static void on_sync(void)
         ESP_LOGE(TAG, "ensure address rc=%d", rc);
         return;
     }
-    rc = ble_hs_id_infer_auto(0, &s_addr_type);
+    rc = ble_hs_id_infer_auto(0, &s_address_type);
     if (rc) {
         ESP_LOGE(TAG, "infer address rc=%d", rc);
         return;
     }
-    advertise();
+    start_advertising();
 }
 
 static void host_task(void *arg)
@@ -394,26 +432,52 @@ static void host_task(void *arg)
     nimble_port_freertos_deinit();
 }
 
-static int notify(uint16_t handle, const void *data, uint16_t len)
+static int enqueue_notification(uint16_t handle, const void *data, uint16_t len)
 {
-    if (s_conn == BLE_HS_CONN_HANDLE_NONE) return BLE_HS_ENOTCONN;
+    xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+    uint16_t connection_handle = s_connection_handle;
+    xSemaphoreGive(s_connection_lock);
+    if (connection_handle == BLE_HS_CONN_HANDLE_NONE) return BLE_HS_ENOTCONN;
     struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
     if (!om) return BLE_HS_ENOMEM;
-    return ble_gatts_notify_custom(s_conn, handle, om);
+    return ble_gatts_notify_custom(connection_handle, handle, om);
 }
 
-static void notify_task(void *arg)
+static void check_pairing_timeout(void)
+{
+    xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+    if (s_pairing_deadline_us != 0 &&
+        esp_timer_get_time() >= s_pairing_deadline_us) {
+        s_pairing_deadline_us = 0;
+        SYSTEM_STATE_SET(pairing, false);
+        app_event_publish(APP_EVENT_PAIRING_TIMEOUT, 0);
+    }
+    xSemaphoreGive(s_connection_lock);
+}
+
+static void notification_task(void *arg)
 {
     (void)arg;
 
     TickType_t wake = xTaskGetTickCount();
     uint64_t rate_window_us = esp_timer_get_time();
     uint64_t status_due_us = rate_window_us;
+#if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY || CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
+    uint64_t next_imu_due_us = 0;
+    uint32_t last_imu_rate_hz = 0;
+#endif
+    unsigned connection_generation = 0;
 
     uint32_t sent_in_window = 0;
+#if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY
     uint32_t last_imu_sequence = UINT32_MAX;
+#endif
+#if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
     uint32_t last_raw_sequence = UINT32_MAX;
+#endif
+#if CONFIG_AUX_ADC_ENABLED
     uint32_t last_adc_sequence = UINT32_MAX;
+#endif
     uint8_t last_battery = UINT8_MAX;
 
     while (true) {
@@ -421,82 +485,90 @@ static void notify_task(void *arg)
         system_state_snapshot(&state);
 
         maybe_request_connection_update();
+        check_pairing_timeout();
 
-        uint32_t requested_rate =
-            state.requested_rate_hz ? state.requested_rate_hz : 1;
+        uint64_t now_us = esp_timer_get_time();
+        unsigned current_generation = atomic_load(&s_connection_generation);
+        if (current_generation != connection_generation) {
+            connection_generation = current_generation;
+            last_battery = UINT8_MAX;
+            status_due_us = now_us;
+#if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY || CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
+            next_imu_due_us = now_us;
+#endif
+#if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY
+            last_imu_sequence = UINT32_MAX;
+#endif
+#if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
+            last_raw_sequence = UINT32_MAX;
+#endif
+#if CONFIG_AUX_ADC_ENABLED
+            last_adc_sequence = UINT32_MAX;
+#endif
+        }
+
+        uint32_t imu_rate_hz =
+            state.requested_imu_rate_hz ? state.requested_imu_rate_hz : 1;
+        bool streaming = atomic_load(&s_notifications_enabled) && state.ble_connected;
+#if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY || CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
+        if (imu_rate_hz != last_imu_rate_hz) {
+            next_imu_due_us = now_us;
+            last_imu_rate_hz = imu_rate_hz;
+        }
+        bool imu_due = now_us >= next_imu_due_us;
+        if (imu_due) {
+            uint64_t interval_us = 1000000ULL / imu_rate_hz;
+            /* Skip missed intervals while retaining phase across rounded task ticks. */
+            next_imu_due_us += ((now_us - next_imu_due_us) / interval_us + 1) * interval_us;
+        }
+#endif
+        uint32_t poll_rate_hz = 10; /* Remain responsive without polling idle streams. */
+        if (state.ble_connected && state.status_period_ms > 0 &&
+            (gatt_status_subscribed() || gatt_battery_subscribed())) {
+            uint32_t status_rate_hz = (1000U + state.status_period_ms - 1) /
+                                      state.status_period_ms;
+            if (status_rate_hz > poll_rate_hz) poll_rate_hz = status_rate_hz;
+        }
+        if (streaming) {
+            if (gatt_dmp_subscribed() || gatt_imu_raw_subscribed())
+                poll_rate_hz = imu_rate_hz > poll_rate_hz ? imu_rate_hz : poll_rate_hz;
+#if CONFIG_AUX_ADC_ENABLED
+            if (gatt_aux_subscribed() && state.requested_adc_rate_hz > poll_rate_hz)
+                poll_rate_hz = state.requested_adc_rate_hz;
+#endif
+        }
 
         TickType_t period =
-            pdMS_TO_TICKS(1000U / requested_rate);
+            pdMS_TO_TICKS(1000U / poll_rate_hz);
 
         if (period == 0) {
             period = 1;
         }
-#if CONFIG_IMU_DMP_ENABLED
-        if (s_streaming &&
-            state.ble_connected //&&
-            ) {
-                if (gatt_imu_raw_subscribed()){
-
-                }
-                if (gatt_imu_subscribed()){                    
-                    imu_dmp_sample_t sample;
-        
-                    if (imu_manager_latest(&sample)) {
-                        bool is_new =
-                            sample.sequence != last_imu_sequence;
-        
-        #if CONFIG_IMU_NOTIFY_DUPLICATE_SAMPLES
-                        is_new = true;
-        #endif
-        
-                        if (is_new) {
-                            uint8_t packet[IMU_PACKET_Q30_SIZE];
-        
-                            size_t length = ble_encode_imu_for_mtu(
-                                packet,
-                                sizeof(packet),
-                                state.mtu,
-                                &sample);
-        
-                            if (length == 0) {
-                                /*
-                                 * No compatible packet fits. Count once per new
-                                 * sample rather than continuously retrying it.
-                                 */
-                                SYSTEM_STATE_INCREMENT(dropped_notifications);
-
-                                last_imu_sequence = sample.sequence;
-                            } else {
-                                int rc = notify(
-                                    gatt_imu_handle,
-                                    packet,
-                                    (uint16_t)length);
-        
-                                if (rc == 0) {
-                                    sent_in_window++;
-                                    last_imu_sequence = sample.sequence;
-                                } else {
-                                    /*
-                                     * Notification failure is recoverable. Do not
-                                     * disconnect the peer.
-                                     */
-                                    SYSTEM_STATE_INCREMENT(dropped_notifications);
-
-                                    /*
-                                     * Mark this sample consumed for deterministic
-                                     * behavior. A later sample will be attempted.
-                                     */
-                                    last_imu_sequence = sample.sequence;
-                                }
-                            }
-                        }
+#if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY
+        if (streaming && imu_due && gatt_dmp_subscribed()) {
+            imu_dmp_sample_t sample;
+            if (imu_manager_latest_dmp(&sample)) {
+                bool is_new = sample.sequence != last_imu_sequence;
+#if CONFIG_IMU_NOTIFY_DUPLICATE_SAMPLES
+                is_new = true;
+#endif
+                if (is_new) {
+                    uint8_t packet[IMU_PACKET_Q30_SIZE];
+                    size_t length = ble_encode_imu_for_mtu(
+                        packet, sizeof(packet), state.mtu, &sample);
+                    if (length == 0 || enqueue_notification(gatt_dmp_handle, packet, length) != 0) {
+                        SYSTEM_STATE_INCREMENT(dropped_notifications);
+                    } else {
+                        ++sent_in_window;
                     }
+                    /* Consume samples once, including recoverable enqueue failures. */
+                    last_imu_sequence = sample.sequence;
                 }
+            }
         }
 #endif
 #if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
-        if (s_streaming &&
-            state.ble_connected &&
+        if (streaming && imu_due &&
             gatt_imu_raw_subscribed()) {
 
             imu_raw_sample_t raw_sample;
@@ -516,7 +588,7 @@ static void notify_task(void *arg)
 
                     last_raw_sequence = raw_sample.sequence;
                 } else {
-                    int rc = notify(
+                    int rc = enqueue_notification(
                         gatt_imu_raw_handle,
                         packet,
                         (uint16_t)length);
@@ -540,12 +612,9 @@ static void notify_task(void *arg)
                 }
             }
         }
-#elif CONFIG_IMU_RAW_DUMMMY
-
 #endif
 #if CONFIG_AUX_ADC_ENABLED
-        if (s_streaming &&
-            state.ble_connected &&
+        if (streaming &&
             gatt_aux_subscribed()) {
             adc_sample_t adc_sample;
             if ( adc_manager_latest(&adc_sample) && adc_sample.sequence != last_adc_sequence) {
@@ -561,19 +630,20 @@ static void notify_task(void *arg)
 
                     last_adc_sequence = adc_sample.sequence;
                 } else {
-                    int rc = notify(
+                    int rc = enqueue_notification(
                         gatt_aux_handle,
                         packet,
                         (uint16_t)length);
 
                     if (rc != 0) {
                         SYSTEM_STATE_INCREMENT(dropped_notifications);
-                        // TEST 
-                        ESP_LOGW(TAG, "notify aux failed rc=%d", rc);
-
+                        static unsigned aux_notify_failures;
+                        if (++aux_notify_failures <= 5 || aux_notify_failures % 100 == 0)
+                            ESP_LOGW(TAG, "AUX notification enqueue failure rc=%d count=%u",
+                                     rc, aux_notify_failures);
                     }
                     /*
-                     * Consume each raw sample once. Notification errors are
+                     * Consume each AUX sample once. Notification errors are
                      * recoverable and do not terminate the connection.
                      */
                     last_adc_sequence = adc_sample.sequence;
@@ -582,12 +652,11 @@ static void notify_task(void *arg)
         }
 #endif
 
-        uint64_t now_us = esp_timer_get_time();
+        now_us = esp_timer_get_time();
 
         if (now_us - rate_window_us >= 1000000ULL) {
-            system_state_snapshot(&state);
-            state.actual_notify_rate_hz = sent_in_window;
-            SYSTEM_STATE_SET(actual_notify_rate_hz, state.actual_notify_rate_hz);
+            SYSTEM_STATE_SET(actual_imu_notify_rate_hz,
+                             sent_in_window * 1000000ULL / (now_us - rate_window_us));
 
             sent_in_window = 0;
             rate_window_us = now_us;
@@ -609,7 +678,7 @@ static void notify_task(void *arg)
                     state.mtu);
 
                 if (length != 0) {
-                    int rc = notify(
+                    int rc = enqueue_notification(
                         gatt_status_handle,
                         packet,
                         (uint16_t)length);
@@ -623,7 +692,7 @@ static void notify_task(void *arg)
             if (state.ble_connected &&
                 gatt_battery_subscribed() &&
                 state.battery_percent != last_battery) {
-                int rc = notify(
+                int rc = enqueue_notification(
                     gatt_battery_handle,
                     &state.battery_percent,
                     sizeof(state.battery_percent));
@@ -642,6 +711,9 @@ static void notify_task(void *arg)
 
 esp_err_t ble_manager_init(void)
 {
+    s_connection_lock = xSemaphoreCreateMutex();
+    if (!s_connection_lock) return ESP_ERR_NO_MEM;
+
     esp_err_t err = nimble_port_init();
     if (err != ESP_OK) return err;
 
@@ -699,7 +771,7 @@ esp_err_t ble_manager_init(void)
 esp_err_t ble_manager_start(void)
 {
     nimble_port_freertos_init(host_task);
-    return xTaskCreate(notify_task, "ble_notify", 4096,
+    return xTaskCreate(notification_task, "ble_notify", 4096,
                        NULL, 7, NULL) == pdPASS
         ? ESP_OK : ESP_ERR_NO_MEM;
 }
@@ -711,17 +783,15 @@ void ble_manager_start_pairing(void)
 #endif
     if (ble_gap_adv_active()) ble_gap_adv_stop();
 
-    system_state_t st;
-    system_state_snapshot(&st);
-    st.pairing = true;
-    SYSTEM_STATE_SET(pairing, st.pairing);
-
-    s_pairing_deadline = esp_timer_get_time() +
-                         CONFIG_BLE_PAIRING_TIMEOUT_MS * 1000LL;
-    advertise();
+    xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+    SYSTEM_STATE_SET(pairing, true);
+    s_pairing_deadline_us = esp_timer_get_time() +
+                            CONFIG_BLE_PAIRING_TIMEOUT_MS * 1000LL;
+    xSemaphoreGive(s_connection_lock);
+    start_advertising();
 }
 
 void ble_manager_stop_notifications(void)
 {
-    s_streaming = false;
+    atomic_store(&s_notifications_enabled, false);
 }

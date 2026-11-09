@@ -11,21 +11,23 @@
 
 static const char *TAG = "button";
 
-static void emit(app_event_type_t type)
+static void publish_button_event(app_event_type_t type)
 {
 #if CONFIG_TEST_BUTTON
     ESP_LOGI(TAG, "event=%d", type);
 #endif
-    app_event_publish(type, 0);
+    esp_err_t err = app_event_publish(type, 0);
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "Button event %d not queued: %s", type, esp_err_to_name(err));
 }
 
-static void task_main(void *arg)
+static void button_poll_task(void *arg)
 {
     (void)arg;
     bool stable = board_button_pressed();
     bool candidate = stable;
     int64_t candidate_since = esp_timer_get_time();
-    int64_t pressed_since = 0;
+    int64_t pressed_since = esp_timer_get_time();
     int64_t last_release = 0;
     unsigned clicks = 0;
     bool hold_sent = false;
@@ -45,9 +47,9 @@ static void task_main(void *arg)
             if (stable) {
                 pressed_since = now;
                 hold_sent = false;
-                emit(APP_EVENT_BUTTON_PRESS);
+                publish_button_event(APP_EVENT_BUTTON_PRESS);
             } else {
-                emit(APP_EVENT_BUTTON_RELEASE);
+                publish_button_event(APP_EVENT_BUTTON_RELEASE);
                 if (!hold_sent) {
                     clicks++;
                     last_release = now;
@@ -59,14 +61,14 @@ static void task_main(void *arg)
             now - pressed_since >= CONFIG_BUTTON_HOLD_MS * 1000LL) {
             hold_sent = true;
             clicks = 0;
-            emit(APP_EVENT_BUTTON_HOLD);
+            publish_button_event(APP_EVENT_BUTTON_HOLD);
         }
 
         if (!stable && clicks &&
             now - last_release >= CONFIG_BUTTON_CLICK_WINDOW_MS * 1000LL) {
-            if (clicks == 1) emit(APP_EVENT_BUTTON_SINGLE);
-            else if (clicks == 2) emit(APP_EVENT_BUTTON_DOUBLE);
-            else emit(APP_EVENT_BUTTON_TRIPLE);
+            if (clicks == 1) publish_button_event(APP_EVENT_BUTTON_SINGLE);
+            else if (clicks == 2) publish_button_event(APP_EVENT_BUTTON_DOUBLE);
+            else publish_button_event(APP_EVENT_BUTTON_TRIPLE);
             clicks = 0;
         }
 
@@ -76,6 +78,6 @@ static void task_main(void *arg)
 
 esp_err_t button_manager_start(void)
 {
-    return xTaskCreate(task_main, "button", 3072, NULL, 5, NULL) == pdPASS
+    return xTaskCreate(button_poll_task, "button", 3072, NULL, 5, NULL) == pdPASS
         ? ESP_OK : ESP_ERR_NO_MEM;
 }

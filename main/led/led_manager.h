@@ -12,6 +12,7 @@ typedef enum {
     LED_PATTERN_DEBUG_FLASH,
     LED_PATTERN_POWER_OFF,
     LED_PATTERN_TEST,
+    LED_PATTERN_COUNT,
 } led_pattern_id_t;
 
 esp_err_t led_manager_init(void);

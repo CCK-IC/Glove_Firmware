@@ -7,11 +7,11 @@
 #include "esp_adc/adc_oneshot.h"
 
 static const char *TAG = "board";
-static i2c_master_bus_handle_t s_bus;
+static i2c_master_bus_handle_t s_i2c_bus;
 
-static bool valid_gpio(int pin)
+static bool is_valid_gpio(int gpio)
 {
-    return pin >= 0 && pin < GPIO_NUM_MAX && GPIO_IS_VALID_GPIO(pin);
+    return gpio >= 0 && gpio < GPIO_NUM_MAX && GPIO_IS_VALID_GPIO(gpio);
 }
 
 const char *board_name(void)
@@ -38,7 +38,7 @@ esp_err_t board_config_validate(void)
     };
 
     for (unsigned i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i) {
-        if (!valid_gpio(pins[i])) {
+        if (!is_valid_gpio(pins[i])) {
             ESP_LOGE(TAG, "Invalid GPIO%d", pins[i]);
             return ESP_ERR_INVALID_ARG;
         }
@@ -47,6 +47,15 @@ esp_err_t board_config_validate(void)
                 ESP_LOGE(TAG, "Duplicate GPIO%d assignment", pins[i]);
                 return ESP_ERR_INVALID_ARG;
             }
+        }
+    }
+
+    const int output_gpios[] = {BOARD_I2C_SCL_GPIO, BOARD_I2C_SDA_GPIO,
+        BOARD_LED_GPIO, BOARD_POWER_HOLD_GPIO};
+    for (unsigned i = 0; i < sizeof(output_gpios) / sizeof(output_gpios[0]); ++i) {
+        if (!GPIO_IS_VALID_OUTPUT_GPIO(output_gpios[i])) {
+            ESP_LOGE(TAG, "GPIO%d cannot drive the assigned output", output_gpios[i]);
+            return ESP_ERR_INVALID_ARG;
         }
     }
 
@@ -110,7 +119,7 @@ esp_err_t board_config_init(void)
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
     };
-    err = i2c_new_master_bus(&bus_cfg, &s_bus);
+    err = i2c_new_master_bus(&bus_cfg, &s_i2c_bus);
     if (err != ESP_OK) return err;
 
     ESP_LOGI(TAG, "%s SCL=%d SDA=%d LED=%d ADC=%d BTN=%d HOLD=%d",
@@ -122,7 +131,7 @@ esp_err_t board_config_init(void)
 
 i2c_master_bus_handle_t board_i2c_bus(void)
 {
-    return s_bus;
+    return s_i2c_bus;
 }
 
 bool board_button_pressed(void)
@@ -132,13 +141,13 @@ bool board_button_pressed(void)
 }
 esp_err_t board_adc_get_unit(adc_unit_t unit, adc_oneshot_unit_handle_t *out)
 {
-    static adc_oneshot_unit_handle_t units[SOC_ADC_PERIPH_NUM];
+    static adc_oneshot_unit_handle_t adc_units[SOC_ADC_PERIPH_NUM];
     if (!out || (unsigned)unit >= SOC_ADC_PERIPH_NUM) return ESP_ERR_INVALID_ARG;
-    if (!units[unit]) {
+    if (!adc_units[unit]) {
         adc_oneshot_unit_init_cfg_t cfg = {.unit_id = unit};
-        esp_err_t err = adc_oneshot_new_unit(&cfg, &units[unit]);
+        esp_err_t err = adc_oneshot_new_unit(&cfg, &adc_units[unit]);
         if (err != ESP_OK) return err;
     }
-    *out = units[unit];
+    *out = adc_units[unit];
     return ESP_OK;
 }

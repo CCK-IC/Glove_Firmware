@@ -2,9 +2,13 @@
 #include <stdint.h>
 #include "esp_err.h"
 
+typedef enum {
+    POWER_OFF_REASON_BUTTON = 1,
+    POWER_OFF_REASON_COMMAND = 2,
+    POWER_OFF_REASON_DISCONNECTED = 3,
+} power_off_reason_t;
+
 esp_err_t power_manager_init(void);
 esp_err_t power_manager_start(void);
-esp_err_t power_hold_assert(void);
-esp_err_t power_hold_release(void);
-void power_off_request(uint8_t reason);
-void power_off_sequence(uint8_t reason);
+/* Runs the shutdown sequence in the calling task; do not call from callbacks. */
+void power_manager_request_shutdown(power_off_reason_t reason);

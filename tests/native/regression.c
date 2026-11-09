@@ -5,7 +5,8 @@
 #include "ble/ble_packets.h"
 #include "system_state.h"
 
-int64_t esp_timer_get_time(void) { return 1000000; }
+static int64_t s_now_us = 1000000;
+int64_t esp_timer_get_time(void) { return s_now_us; }
 uint32_t esp_get_free_heap_size(void) { return 1024; }
 uint32_t esp_get_minimum_free_heap_size(void) { return 512; }
 
@@ -19,6 +20,12 @@ static void *samples(void *unused)
     return NULL;
 }
 
+static void *claim_disconnected_shutdown(void *unused)
+{
+    (void)unused;
+    return (void *)(uintptr_t)system_state_try_begin_disconnected_shutdown(3, 30000000);
+}
+
 int main(void)
 {
     assert(system_state_init() == ESP_OK);
@@ -28,8 +35,7 @@ int main(void)
     pthread_t a, b;
     assert(pthread_create(&a, NULL, samples, NULL) == 0);
     assert(pthread_create(&b, NULL, samples, NULL) == 0);
-    stale.ble_connected = true;
-    SYSTEM_STATE_SET(ble_connected, stale.ble_connected);
+    system_state_set_ble_connected(true);
     assert(pthread_join(a, NULL) == 0);
     assert(pthread_join(b, NULL) == 0);
     system_state_snapshot(&state);
@@ -64,6 +70,31 @@ int main(void)
     imu_dmp_sample_t dmp = {.q0_q30 = -1073741824};
     ble_encode_imu_compact(quaternion, &dmp, 100, 56);
     assert(quaternion[8] == 0x00 && quaternion[9] == 0xC0);
-    puts("PASS: AUX bounds/MTU/fields and concurrent state updates");
+    /* A connection blocks shutdown even after the original boot deadline. */
+    s_now_us = 40000000;
+    assert(!system_state_try_begin_disconnected_shutdown(3, 30000000));
+    system_state_set_ble_connected(false);
+    assert(!system_state_try_begin_disconnected_shutdown(3, 0));
+    s_now_us += 29999999;
+    assert(!system_state_try_begin_disconnected_shutdown(3, 30000000));
+    /* Even a connection entirely between monitor polls resets the interval. */
+    system_state_set_ble_connected(true);
+    ++s_now_us;
+    system_state_set_ble_connected(false);
+    s_now_us += 29999999;
+    assert(!system_state_try_begin_disconnected_shutdown(3, 30000000));
+    /* Repeated failed connections must not extend the disconnected interval. */
+    system_state_set_ble_connected(false);
+    ++s_now_us;
+    void *claimed_a, *claimed_b;
+    assert(pthread_create(&a, NULL, claim_disconnected_shutdown, NULL) == 0);
+    assert(pthread_create(&b, NULL, claim_disconnected_shutdown, NULL) == 0);
+    assert(pthread_join(a, &claimed_a) == 0);
+    assert(pthread_join(b, &claimed_b) == 0);
+    assert((uintptr_t)claimed_a + (uintptr_t)claimed_b == 1);
+    assert(!system_state_try_begin_shutdown(1));
+    system_state_snapshot(&state);
+    assert(state.power_off_pending && state.power_off_reason == 3);
+    puts("PASS: AUX bounds/MTU/fields, concurrent state updates and shutdown timing");
     return 0;
 }
