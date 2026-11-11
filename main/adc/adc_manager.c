@@ -10,19 +10,36 @@
 #include "system_state.h"
 
 static const char *TAG = "adc";
-enum { AUX_CHANNEL_COUNT = 8 };
 static SemaphoreHandle_t s_sample_lock;
 static adc_sample_t s_latest_sample;
 static bool s_has_sample;
 static uint32_t s_sample_sequence;
 #if CONFIG_AUX_ADC_ENABLED && !CONFIG_ADC_DUMMY
-static adc_oneshot_unit_handle_t s_adc_units[AUX_CHANNEL_COUNT];
-static adc_channel_t s_adc_channels[AUX_CHANNEL_COUNT];
-static const int s_channel_gpios[AUX_CHANNEL_COUNT] = {
-    CONFIG_AUX_ADC_GPIO_0, CONFIG_AUX_ADC_GPIO_1,
-    CONFIG_AUX_ADC_GPIO_2, CONFIG_AUX_ADC_GPIO_3,
-    CONFIG_AUX_ADC_GPIO_4, CONFIG_AUX_ADC_GPIO_5,
-    CONFIG_AUX_ADC_GPIO_6, CONFIG_AUX_ADC_GPIO_7,
+static adc_oneshot_unit_handle_t s_adc_units[APP_AUX_ADC_CHANNEL_COUNT];
+static adc_channel_t s_adc_channels[APP_AUX_ADC_CHANNEL_COUNT];
+static const int s_channel_gpios[APP_AUX_ADC_CHANNEL_COUNT] = {
+    CONFIG_AUX_ADC_GPIO_0,
+#if CONFIG_AUX_ADC_CHANNEL_COUNT > 1
+    CONFIG_AUX_ADC_GPIO_1,
+#endif
+#if CONFIG_AUX_ADC_CHANNEL_COUNT > 2
+    CONFIG_AUX_ADC_GPIO_2,
+#endif
+#if CONFIG_AUX_ADC_CHANNEL_COUNT > 3
+    CONFIG_AUX_ADC_GPIO_3,
+#endif
+#if CONFIG_AUX_ADC_CHANNEL_COUNT > 4
+    CONFIG_AUX_ADC_GPIO_4,
+#endif
+#if CONFIG_AUX_ADC_CHANNEL_COUNT > 5
+    CONFIG_AUX_ADC_GPIO_5,
+#endif
+#if CONFIG_AUX_ADC_CHANNEL_COUNT > 6
+    CONFIG_AUX_ADC_GPIO_6,
+#endif
+#if CONFIG_AUX_ADC_CHANNEL_COUNT > 7
+    CONFIG_AUX_ADC_GPIO_7,
+#endif
 };
 static adc_atten_t configured_attenuation(void)
 {
@@ -51,12 +68,13 @@ static void adc_sampling_task(void *arg)
             state.requested_adc_rate_hz : 1;
         TickType_t sample_period_ticks = pdMS_TO_TICKS(1000 / sample_rate_hz);
         if (!sample_period_ticks) sample_period_ticks = 1;
+        /* Aggregate initialization keeps every unused packet channel at zero. */
         adc_sample_t sample = {
             .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
         };
         bool sample_valid = true;
 #if CONFIG_AUX_ADC_ENABLED && !CONFIG_ADC_DUMMY
-        for (unsigned channel = 0; channel < AUX_CHANNEL_COUNT && sample_valid; ++channel) {
+        for (unsigned channel = 0; channel < APP_AUX_ADC_CHANNEL_COUNT && sample_valid; ++channel) {
             int raw_sum = 0;
             for (unsigned n = 0; n < CONFIG_ADC_AVERAGE_SAMPLES; ++n) {
                 int raw_count;
@@ -71,8 +89,8 @@ static void adc_sampling_task(void *arg)
             }
             sample.values[channel] = raw_sum / CONFIG_ADC_AVERAGE_SAMPLES;
         }
-#else
-        for (unsigned channel = 0; channel < AUX_CHANNEL_COUNT; ++channel)
+#elif CONFIG_AUX_ADC_ENABLED
+        for (unsigned channel = 0; channel < APP_AUX_ADC_CHANNEL_COUNT; ++channel)
             sample.values[channel] = (channel + 1) * 0x100;
 #endif
         if (sample_valid) {
@@ -105,12 +123,16 @@ esp_err_t adc_manager_init(void)
     if (!s_sample_lock) return ESP_ERR_NO_MEM;
 #if !CONFIG_ADC_DUMMY
     /* Validate the complete mapping before configuring any channels. */
-    adc_unit_t channel_units[AUX_CHANNEL_COUNT];
+    adc_unit_t channel_units[APP_AUX_ADC_CHANNEL_COUNT];
     const int reserved[] = {BOARD_BATTERY_ADC_GPIO, BOARD_I2C_SCL_GPIO,
         BOARD_I2C_SDA_GPIO, BOARD_LED_GPIO, BOARD_BUTTON_GPIO, BOARD_POWER_HOLD_GPIO};
-    for (unsigned i = 0; i < AUX_CHANNEL_COUNT; ++i) {
+    for (unsigned i = 0; i < APP_AUX_ADC_CHANNEL_COUNT; ++i) {
         for (unsigned j = 0; j < sizeof(reserved) / sizeof(reserved[0]); ++j)
-            if (s_channel_gpios[i] == reserved[j]) return ESP_ERR_INVALID_ARG;
+            if (s_channel_gpios[i] == reserved[j]) {
+                ESP_LOGE(TAG, "AUX channel %u GPIO%d is reserved by the board", i,
+                         s_channel_gpios[i]);
+                return ESP_ERR_INVALID_ARG;
+            }
         for (unsigned j = 0; j < i; ++j)
             if (s_channel_gpios[i] == s_channel_gpios[j]) return ESP_ERR_INVALID_ARG;
         esp_err_t err = adc_oneshot_io_to_channel(s_channel_gpios[i],
@@ -120,7 +142,7 @@ esp_err_t adc_manager_init(void)
             return err;
         }
     }
-    for (unsigned i = 0; i < AUX_CHANNEL_COUNT; ++i) {
+    for (unsigned i = 0; i < APP_AUX_ADC_CHANNEL_COUNT; ++i) {
         esp_err_t err = board_adc_get_unit(channel_units[i], &s_adc_units[i]);
         if (err != ESP_OK) return err;
         adc_oneshot_chan_cfg_t cfg = {

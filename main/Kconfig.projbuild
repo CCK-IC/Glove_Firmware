@@ -428,8 +428,30 @@ mainmenu "Project configuration"
             default n
             help
                 For development and testing, this option generates a dummy ADC value
-                instead of reading the actual ADC. The value is a sawtooth waveform
-                that cycles from 0 to 4095 (12-bit) over 10 seconds.
+                instead of reading the actual ADC. Each enabled channel contains
+                a fixed count of (channel index + 1) * 256. Unused AUX packet
+                channels are zero.
+
+        config AUX_ADC_CHANNEL_COUNT
+            int "Number of AUX ADC channels"
+            depends on AUX_ADC_ENABLED
+            range 1 3 if IDF_TARGET_ESP32C3
+            range 1 8
+            default 3 if IDF_TARGET_ESP32C3
+            default 8
+            help
+                Number of inputs sampled into AUX packet channels 0 onward.
+                ESP32-C3 is limited to three AUX inputs after reserving one
+                of the XIAO board's four analog pins for the battery.
+                The AUX packet always has eight values; unused values are zero
+                in both real and dummy modes.
+
+                Real inputs must use distinct ADC-capable GPIOs that do not
+                overlap battery, I2C, LED, button, or power-hold assignments.
+                C3 mappings default to unconfigured (-1) so they must be set
+                for the actual wiring. GPIO5 is the default C3 power-hold pin
+                and uses ADC2, which ESP-IDF restricts on C3. Configure fewer
+                channels when three usable inputs are not available.
 
         choice ADC_ATTENUATION
             prompt "ADC attenuation"
@@ -468,51 +490,67 @@ mainmenu "Project configuration"
             default 1
 
         config AUX_ADC_GPIO_0
-            int "AUX channel 0 GPIO, IO2@S3(-1 = unconfigured)"
-            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            int "AUX channel 0 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY && AUX_ADC_CHANNEL_COUNT > 0
+            range -1 5 if IDF_TARGET_ESP32C3
             range -1 48
+            default -1 if IDF_TARGET_ESP32C3
             default 2
 
         config AUX_ADC_GPIO_1
-            int "AUX channel 1 GPIO, IO3@S3(-1 = unconfigured)"
-            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            int "AUX channel 1 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY && AUX_ADC_CHANNEL_COUNT > 1
+            range -1 5 if IDF_TARGET_ESP32C3
             range -1 48
+            default -1 if IDF_TARGET_ESP32C3
             default 3
 
         config AUX_ADC_GPIO_2
-            int "AUX channel 2 GPIO, IO4@S3(-1 = unconfigured)"
-            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            int "AUX channel 2 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY && AUX_ADC_CHANNEL_COUNT > 2
+            range -1 5 if IDF_TARGET_ESP32C3
             range -1 48
+            default -1 if IDF_TARGET_ESP32C3
             default 4
 
         config AUX_ADC_GPIO_3
-            int "AUX channel 3 GPIO, IO5@S3 (-1 = unconfigured)"
-            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            int "AUX channel 3 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY && AUX_ADC_CHANNEL_COUNT > 3
+            range -1 5 if IDF_TARGET_ESP32C3
             range -1 48
+            default -1 if IDF_TARGET_ESP32C3
             default 5
 
         config AUX_ADC_GPIO_4
-            int "AUX channel 4 GPIO, IO6@S3 (-1 = unconfigured)"
-            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            int "AUX channel 4 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY && AUX_ADC_CHANNEL_COUNT > 4
+            range -1 5 if IDF_TARGET_ESP32C3
             range -1 48
+            default -1 if IDF_TARGET_ESP32C3
             default 6
 
         config AUX_ADC_GPIO_5
-            int "AUX channel 5 GPIO, IO7@S3 (-1 = unconfigured)"
-            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            int "AUX channel 5 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY && AUX_ADC_CHANNEL_COUNT > 5
+            range -1 5 if IDF_TARGET_ESP32C3
             range -1 48
+            default -1 if IDF_TARGET_ESP32C3
             default 7
 
         config AUX_ADC_GPIO_6
-            int "AUX channel 6 GPIO, IO8@S3 (-1 = unconfigured)"
-            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            int "AUX channel 6 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY && AUX_ADC_CHANNEL_COUNT > 6
+            range -1 5 if IDF_TARGET_ESP32C3
             range -1 48
+            default -1 if IDF_TARGET_ESP32C3
             default 8
 
         config AUX_ADC_GPIO_7
-            int "AUX channel 7 GPIO, IO9@S3 (-1 = unconfigured)"
-            depends on AUX_ADC_ENABLED && !ADC_DUMMY
+            int "AUX channel 7 GPIO (-1 = unconfigured)"
+            depends on AUX_ADC_ENABLED && !ADC_DUMMY && AUX_ADC_CHANNEL_COUNT > 7
+            range -1 5 if IDF_TARGET_ESP32C3
             range -1 48
+            default -1 if IDF_TARGET_ESP32C3
             default 9
 
     endmenu

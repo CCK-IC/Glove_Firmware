@@ -1,5 +1,23 @@
 # Firmware handoff
 
+## C3 AUX channel limit, 2026-11-11
+
+- Added `AUX_ADC_CHANNEL_COUNT`: 1–3 inputs on C3 (default 3), 1–8 on S3
+  (default 8). Menuconfig exposes only the configured GPIO assignments. C3
+  real-input GPIOs default to -1 and require explicit wiring configuration.
+- Acquisition samples only those inputs. Real and dummy samples zero unused
+  fields, and the AUX encoder also masks unused slots defensively. AUX V1
+  remains 22 bytes with eight signed 16-bit values, so existing clients can
+  display the unused channels as zero.
+- The default C3 battery pin is GPIO2 and power-hold pin is GPIO5. GPIO5 also
+  uses ADC2, which ESP-IDF restricts on C3. The maximum count does not guarantee
+  three usable real inputs under a particular wiring configuration.
+- The configured ESP32-C3 firmware build passed using CMake. Sanitizer-backed
+  packet/state/ADC tests passed for C3 counts 1 and 3, S3 count 8, and disabled
+  AUX. Ten SDK syntax variants and focused C3/S3 Kconfig resolution checks
+  passed. GPIO wiring and BLE delivery have not been tested on hardware.
+
+
 For the subsequent refactor and current review findings, see
 [REFACTOR_REVIEW.md](REFACTOR_REVIEW.md). The snapshot below records the
 pre-refactor history and validation results.

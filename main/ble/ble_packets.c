@@ -13,7 +13,18 @@
 _Static_assert(IMU_PACKET_Q30_SIZE == 28, "Unexpected Q30 packet size");
 _Static_assert(IMU_PACKET_COMPACT_SIZE == 20,
                "Unexpected compact IMU packet size");
-_Static_assert(AUX_PACKET_V1_SIZE == 6 + 8 * 2, "Unexpected AUX packet size");
+_Static_assert(AUX_PACKET_V1_SIZE == 6 + AUX_PACKET_CHANNEL_COUNT * 2,
+               "Unexpected AUX packet size");
+_Static_assert(APP_AUX_ADC_CHANNEL_COUNT <= AUX_PACKET_CHANNEL_COUNT,
+               "Too many AUX ADC channels");
+#if CONFIG_AUX_ADC_ENABLED
+_Static_assert(APP_AUX_ADC_CHANNEL_COUNT >= 1,
+               "At least one AUX ADC channel is required");
+#if CONFIG_IDF_TARGET_ESP32C3
+_Static_assert(APP_AUX_ADC_CHANNEL_COUNT <= 3,
+               "ESP32-C3 supports at most three AUX channels");
+#endif
+#endif
 _Static_assert(IMU_RAW_FULL_V1_SIZE == 36,
                "Unexpected full raw IMU packet size");
 _Static_assert(IMU_RAW_COMPACT_V2_SIZE == 20,
@@ -84,12 +95,17 @@ void ble_encode_imu_q30(
 }
 
 void ble_encode_aux(uint8_t out[AUX_PACKET_V1_SIZE],
-                    uint32_t timestamp_ms, uint8_t sequence, const int16_t values[8])
+                    uint32_t timestamp_ms, uint8_t sequence,
+                    const int16_t values[AUX_PACKET_CHANNEL_COUNT])
 {
     out[0] = AUX_PACKET_VERSION;
     out[1] = sequence;
     put_u32_le(out + 2, timestamp_ms);
-    for (int i = 0; i < 8; ++i) put_i16_le(out + 6 + i * 2, values[i]);
+    const unsigned active_channels = APP_AUX_ADC_CHANNEL_COUNT;
+    for (unsigned i = 0; i < AUX_PACKET_CHANNEL_COUNT; ++i) {
+        const int16_t value = i < active_channels ? values[i] : 0;
+        put_i16_le(out + 6 + i * 2, value);
+    }
 }
 
 size_t ble_encode_aux_for_mtu(

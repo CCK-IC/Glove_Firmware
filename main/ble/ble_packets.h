@@ -41,6 +41,7 @@ enum {
 #define STATUS_PACKET_FULL_SIZE   64U
 #define STATUS_PACKET_COMPACT_SIZE 20U
 #define AUX_PACKET_V1_SIZE 22U
+#define AUX_PACKET_CHANNEL_COUNT 8U
 
 
 typedef struct {
@@ -82,7 +83,7 @@ typedef struct {
 typedef struct {
     uint32_t sequence;
     uint32_t timestamp_ms;
-    int16_t values[8];
+    int16_t values[AUX_PACKET_CHANNEL_COUNT];
 } adc_sample_t;
 
 size_t ble_encode_aux_for_mtu(uint8_t *out,
@@ -92,7 +93,7 @@ size_t ble_encode_aux_for_mtu(uint8_t *out,
 
 void ble_encode_aux(uint8_t out[AUX_PACKET_V1_SIZE],
     uint32_t timestamp_ms, uint8_t sequence,
-    const int16_t values[8]);
+    const int16_t values[AUX_PACKET_CHANNEL_COUNT]);
 
 void ble_encode_imu_q30(
     uint8_t out[IMU_PACKET_Q30_SIZE],
