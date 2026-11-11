@@ -2,6 +2,8 @@
 
 #include <math.h>
 #include <stdatomic.h>
+#include <string.h>
+#include "magnetometer_reader.h"
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -17,6 +19,7 @@
 static const char *TAG = "imu";
 #if CONFIG_IMU_ENABLED
 static icm20948_device_t s_sensor;
+static imu_magnetometer_t s_magnetometer;
 static icm0948_config_i2c_t s_i2c_config;
 #endif
 static SemaphoreHandle_t s_device_lock;
@@ -30,6 +33,9 @@ static atomic_bool s_acquisition_active;
 static bool s_sensor_ready;
 #if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY
 static uint32_t s_dmp_sequence;
+#if CONFIG_IMU_DMP_ENABLED
+static bool s_dmp_fifo_needs_reset;
+#endif
 #endif
 #if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
 static uint32_t s_raw_sequence;
@@ -88,6 +94,7 @@ static void generate_dmp_sample(imu_dmp_sample_t *sample)
 static esp_err_t configure_sensor(void)
 {
 #if CONFIG_IMU_ENABLED
+    memset(&s_magnetometer, 0, sizeof(s_magnetometer));
     const i2c_device_config_t device_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = CONFIG_IMU_I2C_ADDRESS,
@@ -146,8 +153,14 @@ static esp_err_t configure_sensor(void)
     IMU_INIT_CHECK(icm20948_set_dlpf_cfg(&s_sensor, sensors, low_pass_filter), ESP_FAIL);
     IMU_INIT_CHECK(icm20948_enable_dlpf(&s_sensor, ICM_20948_INTERNAL_ACC, false), ESP_FAIL);
     IMU_INIT_CHECK(icm20948_enable_dlpf(&s_sensor, ICM_20948_INTERNAL_GYR, false), ESP_FAIL);
-    IMU_INIT_CHECK(icm20948_configure_magnetometer(&s_sensor, AK09916_MODE_CONT_100_HZ),
+#if CONFIG_IMU_DMP_ENABLED
+    /* Leave the AK09916 powered down for the DMP's single-shot controller. */
+    IMU_INIT_CHECK(imu_magnetometer_configure(&s_sensor, &s_magnetometer, true),
                    ESP_ERR_NOT_FOUND);
+#else
+    IMU_INIT_CHECK(imu_magnetometer_configure(&s_sensor, &s_magnetometer, false),
+                   ESP_ERR_NOT_FOUND);
+#endif
 
 #if CONFIG_IMU_DMP_ENABLED
     IMU_INIT_CHECK(icm20948_init_dmp_sensor_with_defaults(&s_sensor), ESP_FAIL);
@@ -155,10 +168,15 @@ static esp_err_t configure_sensor(void)
         &s_sensor, INV_ICM20948_SENSOR_ORIENTATION, 1), ESP_FAIL);
     IMU_INIT_CHECK(inv_icm20948_set_dmp_sensor_period(
         &s_sensor, DMP_ODR_Reg_Quat9, 0), ESP_FAIL);
+    IMU_INIT_CHECK(inv_icm20948_enable_dmp_sensor(
+        &s_sensor, INV_ICM20948_SENSOR_MAGNETIC_FIELD_UNCALIBRATED, 1), ESP_FAIL);
+    IMU_INIT_CHECK(inv_icm20948_set_dmp_sensor_period(
+        &s_sensor, DMP_ODR_Reg_Cpass, 0), ESP_FAIL);
     IMU_INIT_CHECK(icm20948_enable_fifo(&s_sensor, true), ESP_FAIL);
     IMU_INIT_CHECK(icm20948_enable_dmp(&s_sensor, true), ESP_FAIL);
     IMU_INIT_CHECK(icm20948_reset_dmp(&s_sensor), ESP_FAIL);
     IMU_INIT_CHECK(icm20948_reset_fifo(&s_sensor), ESP_FAIL);
+    s_dmp_fifo_needs_reset = false;
     SYSTEM_STATE_SET(imu_dmp, true);
     SYSTEM_STATE_SET(requested_imu_rate_hz, CONFIG_IMU_DMP_RATE_HZ);
     /* These are estimates until the acquisition task measures actual output. */
@@ -175,26 +193,70 @@ static esp_err_t configure_sensor(void)
 }
 
 #if CONFIG_IMU_DMP_ENABLED
-/* Called with s_device_lock held, as all accesses share the driver's bank cache. */
+/* All FIFO and cache accesses below require s_device_lock. */
+static bool recover_dmp_fifo(void)
+{
+    imu_magnetometer_invalidate(&s_magnetometer);
+    /* The driver caches bank changes before confirming the host write. */
+    s_sensor._last_bank = 255;
+    s_dmp_fifo_needs_reset = icm20948_reset_fifo(&s_sensor) != ICM_20948_STAT_OK;
+    SYSTEM_STATE_INCREMENT(imu_reinitializations);
+    if (s_dmp_fifo_needs_reset) system_state_set_error("imu_fifo", ESP_FAIL);
+    return !s_dmp_fifo_needs_reset;
+}
+
 static bool read_dmp_sample(imu_dmp_sample_t *sample, unsigned *consecutive_errors)
 {
+    if (s_dmp_fifo_needs_reset && !recover_dmp_fifo()) return false;
     icm_20948_DMP_data_t fifo_data = {0};
-    icm20948_status_e status = inv_icm20948_read_dmp_data(&s_sensor, &fifo_data);
-    if (status == ICM_20948_STAT_FIFO_NO_DATA_AVAIL ||
-        status == ICM_20948_STAT_FIFO_INCOMPLETE_DATA) return false;
-    if (status != ICM_20948_STAT_OK && status != ICM_20948_STAT_FIFO_MORE_DATA_AVAIL) {
-        SYSTEM_STATE_INCREMENT(dropped_dmp_samples);
-        if (++*consecutive_errors >= CONFIG_IMU_ERROR_REINIT_COUNT) {
-            SYSTEM_STATE_SET(imu_state, IMU_STATE_DEGRADED);
-            if (icm20948_reset_fifo(&s_sensor) != ICM_20948_STAT_OK)
-                system_state_set_error("imu_fifo", ESP_FAIL);
-            SYSTEM_STATE_INCREMENT(imu_reinitializations);
-            *consecutive_errors = 0;
+    icm_20948_DMP_data_t latest_quaternion = {0};
+    imu_magnetometer_t pending_mag = s_magnetometer;
+    bool quaternion_ready = false;
+    bool compass_ready = false;
+    const int64_t started_us = esp_timer_get_time();
+    icm20948_status_e status;
+    unsigned frames = 0;
+    do {
+        status = inv_icm20948_read_dmp_data(&s_sensor, &fifo_data);
+        if (status == ICM_20948_STAT_FIFO_NO_DATA_AVAIL) break;
+        if (status != ICM_20948_STAT_OK && status != ICM_20948_STAT_FIFO_MORE_DATA_AVAIL) {
+            imu_magnetometer_invalidate(&s_magnetometer);
+            SYSTEM_STATE_INCREMENT(dropped_dmp_samples);
+            /* Any transport error may follow a destructive partial read.
+             * Resume only after a successful reset restores frame alignment. */
+            if (++*consecutive_errors >= CONFIG_IMU_ERROR_REINIT_COUNT)
+                SYSTEM_STATE_SET(imu_state, IMU_STATE_DEGRADED);
+            s_dmp_fifo_needs_reset = true;
+            (void)recover_dmp_fifo();
+            return false;
         }
+        *consecutive_errors = 0;
+        if (fifo_data.header & DMP_header_bitmap_Compass) {
+            /* FIFO Compass is signed AK counts, unlike calibrated uT-Q16. */
+            imu_magnetometer_update(&pending_mag, fifo_data.Compass.Data.X,
+                fifo_data.Compass.Data.Y, fifo_data.Compass.Data.Z, started_us);
+            compass_ready = true;
+        }
+        if (fifo_data.header & DMP_header_bitmap_Quat9) {
+            latest_quaternion = fifo_data;
+            quaternion_ready = true;
+        }
+        ++frames;
+    } while (status == ICM_20948_STAT_FIFO_MORE_DATA_AVAIL && frames < 8 &&
+             esp_timer_get_time() - started_us < 5000);
+
+    if (status == ICM_20948_STAT_FIFO_MORE_DATA_AVAIL ||
+        esp_timer_get_time() - started_us >= 5000) {
+        /* Discard an undrained backlog instead of giving old compass data a
+         * fresh dequeue timestamp. Bound FIFO work so raw/BLE tasks can run. */
+        s_dmp_fifo_needs_reset = true;
+        (void)recover_dmp_fifo();
+        SYSTEM_STATE_INCREMENT(dropped_dmp_samples);
         return false;
     }
-    *consecutive_errors = 0;
-    if ((fifo_data.header & DMP_header_bitmap_Quat9) == 0) return false;
+    if (compass_ready) s_magnetometer = pending_mag;
+    if (!quaternion_ready) return false;
+    fifo_data = latest_quaternion;
 
     double q1 = (double)fifo_data.Quat9.Data.Q1 / 1073741824.0;
     double q2 = (double)fifo_data.Quat9.Data.Q2 / 1073741824.0;
@@ -242,6 +304,14 @@ static bool acquire_raw_sample(uint64_t now_us, const system_state_t *state)
     icm20948_agmt_t sensor_data = {0};
     xSemaphoreTake(s_device_lock, portMAX_DELAY);
     icm20948_status_e status = icm20948_get_agmt(&s_sensor, &sensor_data);
+    if (status != ICM_20948_STAT_OK) {
+        s_sensor._last_bank = 255;
+        imu_magnetometer_invalidate(&s_magnetometer);
+    }
+    if (status == ICM_20948_STAT_OK && !state->imu_dmp &&
+        imu_magnetometer_poll(&s_sensor, &s_magnetometer, now_us) != ICM_20948_STAT_OK)
+        system_state_set_error("imu_mag", ESP_FAIL);
+    imu_magnetometer_apply(&s_magnetometer, &sample, esp_timer_get_time());
     xSemaphoreGive(s_device_lock);
     if (status != ICM_20948_STAT_OK) {
         SYSTEM_STATE_INCREMENT(dropped_raw_samples);
@@ -254,26 +324,9 @@ static bool acquire_raw_sample(uint64_t now_us, const system_state_t *state)
     sample.gyro_x = sensor_data.gyr.axes.x;
     sample.gyro_y = sensor_data.gyr.axes.y;
     sample.gyro_z = sensor_data.gyr.axes.z;
-    sample.mag_x = sensor_data.mag.axes.x;
-    sample.mag_y = sensor_data.mag.axes.y;
-    sample.mag_z = sensor_data.mag.axes.z;
     sample.temperature = sensor_data.tmp.val;
     sample.accel_range_code = sensor_data.fss.a;
     sample.gyro_range_code = sensor_data.fss.g;
-    if (state->imu_dmp) {
-        /* DMP changes SLV0 to its reserved-register, byte-swapped layout.
-         * get_agmt() decodes the normal ST1/XYZ/ST2 layout, so its magnetic
-         * values and status bits cannot be trusted in this mode. */
-        sample.flags &= (uint8_t)~IMU_RAW_FLAG_MAG_VALID;
-    } else {
-        enum { MAG_DATA_READY_MASK = 1U << 0, MAG_OVERFLOW_MASK = 1U << 3 };
-        if ((sensor_data.magStat1 & MAG_DATA_READY_MASK) == 0)
-            sample.flags &= (uint8_t)~IMU_RAW_FLAG_MAG_VALID;
-        if ((sensor_data.magStat2 & MAG_OVERFLOW_MASK) != 0) {
-            sample.flags |= IMU_RAW_FLAG_MAG_OVERFLOW;
-            sample.flags &= (uint8_t)~IMU_RAW_FLAG_MAG_VALID;
-        }
-    }
 #endif
     if (state->imu_dmp) sample.flags |= IMU_RAW_FLAG_DMP_CONCURRENT;
     publish_raw_sample(&sample);
@@ -439,6 +492,7 @@ esp_err_t imu_manager_sleep(void)
     if (!s_sensor_ready) return ESP_OK;
 #if CONFIG_IMU_ENABLED
     xSemaphoreTake(s_device_lock, portMAX_DELAY);
+    imu_magnetometer_invalidate(&s_magnetometer);
     icm20948_status_e status = icm20948_sleep(&s_sensor, true);
     xSemaphoreGive(s_device_lock);
     return status == ICM_20948_STAT_OK ? ESP_OK : ESP_FAIL;
@@ -452,10 +506,10 @@ esp_err_t imu_manager_reset_fifo(void)
     if (!s_sensor_ready) return ESP_ERR_INVALID_STATE;
 #if CONFIG_IMU_DMP_ENABLED
     xSemaphoreTake(s_device_lock, portMAX_DELAY);
-    icm20948_status_e status = icm20948_reset_fifo(&s_sensor);
+    s_dmp_fifo_needs_reset = true;
+    const bool recovered = recover_dmp_fifo();
     xSemaphoreGive(s_device_lock);
-    SYSTEM_STATE_INCREMENT(imu_reinitializations);
-    return status == ICM_20948_STAT_OK ? ESP_OK : ESP_FAIL;
+    return recovered ? ESP_OK : ESP_FAIL;
 #else
     return ESP_ERR_NOT_SUPPORTED;
 #endif

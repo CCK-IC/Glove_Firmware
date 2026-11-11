@@ -8,6 +8,7 @@ idf_component_register(
         "ble/gatt_server.c"
         "ble/ble_manager.c"
         "imu/imu_manager.c"
+        "imu/magnetometer_reader.c"
         "adc/adc_manager.c"
         "battery/battery_manager.c"
         "button/button_manager.c"

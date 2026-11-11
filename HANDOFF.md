@@ -1,5 +1,39 @@
 # Firmware handoff
 
+## Magnetometer validity — firmware 1.3.0, 2026-11-11
+
+- Branch `codex/v1.3.0` starts from `codex/v1.2.0` (`e67e90b`). The BLE
+  status version and ESP-IDF image metadata are 1.3.0.
+- Raw mode disables the autonomous SLV0/SLV1 reads/writes and uses checked
+  SLV4 transactions to read AK09916 ST1, then HXL through ST2. This prevents
+  background reads from clearing DRDY before the host observes it. Identity
+  and measurement mode are verified during initialization.
+- A complete, non-overflow vector stays valid for less than 100 ms. No-data
+  polls retain that vector without extending its timestamp; overflow, I2C
+  failure, reset and sleep invalidate it. Partial reads release ST2 before
+  retrying. A failed transaction must confirm SLV4 is disabled before reuse,
+  and failed bank selections invalidate the driver's bank cache. Completion
+  polling is limited to 5 ms per byte and 20 ms per poll;
+  a blocking host I2C transfer is additionally subject to the driver timeout.
+- DMP keeps its own auxiliary-slave layout and single-shot mode. Raw packets
+  use uncalibrated Compass FIFO counts instead of decoding that incompatible
+  layout as normal AGMT data. FIFO draining is bounded; incomplete frames and
+  undrained backlogs reset the FIFO and invalidate magnetic data. Transport
+  errors also reset it; a failed reset blocks further frame reads until recovery.
+  `IMU_ERROR_REINIT_COUNT` now controls the degraded-status threshold; frame
+  resynchronization is immediate after any destructive read error.
+- BLE packet formats are unchanged. Magnetic data needs full raw V1 (36-byte
+  payload, ATT MTU at least 39); compact raw V2 carries no magnetic values.
+- Verification: complete ESP32-C3 raw and managed-DMP+raw builds passed,
+  with version 1.3.0 embedded. Existing packet/state/ADC regressions, ten SDK
+  syntax variants, and new raw/DMP magnetometer sanitizer tests passed.
+- Hardware verification remains required: flash 1.3.0, confirm the status
+  version, use real raw mode with full V1 packets, rotate the board and confirm
+  magnetic validity and changing signed values. Check DMP+raw separately,
+  including count scale/axis signs and FIFO recovery. The build alone does not
+  establish that the physical sensor is functioning.
+
+
 ## C3 AUX channel limit, 2026-11-11
 
 - Added `AUX_ADC_CHANNEL_COUNT`: 1–3 inputs on C3 (default 3), 1–8 on S3

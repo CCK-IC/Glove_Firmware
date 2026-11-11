@@ -1,5 +1,18 @@
 # Firmware regression checks
 
+Run `python3 tests/native/run_magnetometer.py` to test the production
+magnetometer reader with the actual managed-component headers and a simulated
+register bus. It requires the ICM20948 managed dependency to be installed.
+The sanitizer-backed checks cover initialization, mode/identity checks,
+DRDY/data/ST2 ordering, signed vectors, freshness, overflow, transaction errors,
+timeouts, partial-read recovery and preservation of unrelated packet flags.
+Run `python3 tests/native/run_dmp_magnetometer.py` to check the actual IMU
+manager's Compass-only and quaternion frames, latest-frame selection, raw DMP
+publication, freshness, backlog/time budgets, transport errors, partial frames
+and failed-reset gating under the same sanitizers.
+These tests do not establish physical I2C timing or sensor operation.
+
+
 Run `python3 tests/native/run.py` on macOS with a C compiler. This compiles the
 actual packet encoder, state manager, and ADC manager with minimal host SDK
 shims, using AddressSanitizer and UndefinedBehaviorSanitizer. It checks AUX
@@ -46,6 +59,11 @@ dummy ADC, and disabled AUX.
 - Real IMU initialization retries actual identity reads, rejects an incorrect
   identity, and checks each setup operation. Raw packet scale codes come from
   the full-scale registers read by the IMU driver, including when DMP is active.
+- Firmware 1.3.0 reads raw magnetometer registers through controlled SLV4
+  transactions. DMP+raw uses uncalibrated FIFO Compass counts. Magnetic validity
+  expires after 100 ms without a complete accepted vector, and resets/sleep or
+  read failures invalidate it. Raw V1 is 36 bytes and requires ATT MTU >=39;
+  compact V2 does not contain a magnetometer.
 - Select hardware raw/DMP modes independently from their dummy alternatives.
   Enabling DMP selects the component's required DMP support. The configured
   build remains in its existing dummy mode until explicitly changed.
