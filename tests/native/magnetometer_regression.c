@@ -1,6 +1,7 @@
 /* Test production code through the actual managed driver's API declarations.
  * The fake models read-to-clear MST status, delayed SLV4 completion, and the
- * AK09916 data latch. It never supplies a replacement icm20948 header. */
+ * AK09916 data latch, and the Nov 11 board's cycled-only auxiliary scheduling.
+ * It never supplies a replacement icm20948 header. */
 #include <assert.h>
 #include <limits.h>
 #include <stdio.h>
@@ -33,9 +34,16 @@ static struct {
     unsigned setup_stall_us, di_stall_us;
     uint8_t stall_reg;
     unsigned master_calls, peripheral_calls[2], sample_mode_calls;
+    icm20948_lp_config_cycle_e master_mode;
+    unsigned master_disable_calls, master_reset_calls, recovery_delays;
+    unsigned resets_needed, persistent_fault, recovery_stage, fail_recovery_api;
+    unsigned completion_delay_us, first_completion_delay_us;
+    unsigned recovery_host_calls[5];
+    icm20948_status_e recovery_api_error;
     int64_t now_us, reset_at_us;
+    int64_t master_reset_at_us, transaction_started_at_us;
     bool active, locked, bank_error_pending, bad_mode_readback;
-    bool stop_stuck, gate_required;
+    bool stop_stuck, gate_required, master_enabled;
 } hw;
 
 /* One-shot failures enumerate every host/API seam on the successful path. */
@@ -61,6 +69,7 @@ void esp_rom_delay_us(uint32_t us)
 {
     assert(us >= 100);
     ++hw.delays;
+    if (hw.recovery_stage == 2 && us >= 10000) ++hw.recovery_delays;
     hw.now_us += us;
 }
 
@@ -84,8 +93,18 @@ static uint8_t master_status(void)
     uint8_t status = hw.status;
     hw.status = 0;
     if (status || !hw.active) return status;
+    /* Hardware reproduction: continuous master mode leaves SLV4 EN asserted
+     * with MST_STATUS=0, regardless of elapsed time or a master-only reset.
+     * Accept both API modes below so a wrong production choice stalls here,
+     * rather than failing merely because the fake asserts a chosen constant. */
+    if (hw.master_mode != SAMPLE_MODE_CYCLED) return 0;
     if (++hw.pending_polls < hw.completion_polls) return 0;
+    unsigned delay = hw.transactions == 1 && hw.first_completion_delay_us ?
+        hw.first_completion_delay_us : hw.completion_delay_us;
+    if (hw.now_us - hw.transaction_started_at_us < delay) return 0;
     unsigned fault = hw.transactions == hw.fault_transaction ? hw.fault : 0;
+    if (hw.resets_needed) fault = NACK; /* CTRL=0 cannot repair a stuck master. */
+    if (hw.persistent_fault) fault = hw.persistent_fault;
     if (fault == TIMEOUT) return 0;
     if (fault) return (uint8_t)(DONE | fault); /* Error wins over DONE. */
     transaction_t *txn = &hw.trace[hw.transactions - 1];
@@ -125,6 +144,8 @@ icm20948_status_e icm20948_execute_r(icm20948_device_t *device, uint8_t reg,
     if (hw.bank == 0 && reg == AGB0_REG_I2C_MST_STATUS) {
         *data = master_status();
     } else if (hw.bank == 3 && reg == AGB3_REG_I2C_PERIPH4_CTRL) {
+        if (hw.master_reset_calls && hw.gate_required && !hw.recovery_stage)
+            hw.recovery_host_calls[4] = hw.host_calls;
         ++hw.ctrl_reads;
         if (hw.fail_ctrl_reads) {
             --hw.fail_ctrl_reads;
@@ -157,6 +178,8 @@ icm20948_status_e icm20948_execute_w(icm20948_device_t *device, uint8_t reg,
     case AGB3_REG_I2C_PERIPH4_DO: hw.dout = *data; break;
     case AGB3_REG_I2C_PERIPH4_CTRL:
         if (*data == 0) {
+            if (hw.master_reset_calls && hw.gate_required && !hw.recovery_stage)
+                hw.recovery_host_calls[3] = hw.host_calls;
             ++hw.cancels;
             if (hw.fail_cancels) {
                 --hw.fail_cancels;
@@ -175,6 +198,7 @@ icm20948_status_e icm20948_execute_w(icm20948_device_t *device, uint8_t reg,
         };
         hw.active = true;
         hw.pending_polls = 0;
+        hw.transaction_started_at_us = hw.now_us;
         if (hw.transactions == hw.fail_start_transaction) {
             /* Hardware accepted EN, but the host reports a transfer error. */
             hw.bank_error_pending = true;
@@ -190,8 +214,41 @@ icm20948_status_e icm20948_execute_w(icm20948_device_t *device, uint8_t reg,
 icm20948_status_e icm20948_i2c_master_enable(icm20948_device_t *device, bool enable)
 {
     if (!host_step(device, false)) return HOST_ERROR;
-    assert(enable);
+    if (!enable) {
+        assert(hw.master_enabled && hw.recovery_stage == 0);
+        hw.recovery_host_calls[0] = hw.host_calls;
+        ++hw.master_disable_calls;
+        if (hw.fail_recovery_api == 1) return hw.recovery_api_error;
+        hw.master_enabled = false;
+        hw.recovery_stage = 1;
+        return ICM_20948_STAT_OK;
+    }
+    if (hw.recovery_stage) {
+        assert(hw.recovery_stage == 2);
+        hw.recovery_host_calls[2] = hw.host_calls;
+        assert(hw.now_us - hw.master_reset_at_us >= 10000);
+        if (hw.fail_recovery_api == 3) return hw.recovery_api_error;
+        hw.recovery_stage = 0;
+    }
+    hw.master_enabled = true;
     ++hw.master_calls;
+    return ICM_20948_STAT_OK;
+}
+
+icm20948_status_e icm20948_i2c_master_reset(icm20948_device_t *device)
+{
+    if (!host_step(device, false)) return HOST_ERROR;
+    assert(!hw.master_enabled && hw.recovery_stage == 1);
+    hw.recovery_host_calls[1] = hw.host_calls;
+    ++hw.master_reset_calls;
+    if (hw.fail_recovery_api == 2) return hw.recovery_api_error;
+    hw.recovery_stage = 2;
+    hw.master_reset_at_us = hw.now_us;
+    if (hw.resets_needed) --hw.resets_needed;
+    hw.active = false;
+    hw.status = 0;
+    /* Re-enabling is insufficient: CTRL readback must confirm quiescence. */
+    hw.gate_required = true;
     return ICM_20948_STAT_OK;
 }
 
@@ -213,9 +270,12 @@ icm20948_status_e icm20948_set_sample_mode(icm20948_device_t *device,
     icm20948_internal_sensor_id_bm sensors, icm20948_lp_config_cycle_e mode)
 {
     if (!host_step(device, false)) return HOST_ERROR;
-    assert(sensors == ICM_20948_INTERNAL_MST && mode == SAMPLE_MODE_CONTINUOUS);
-    assert(hw.peripheral_calls[0] == hw.master_calls);
-    assert(hw.peripheral_calls[1] == hw.master_calls);
+    assert(sensors == ICM_20948_INTERNAL_MST);
+    assert(mode == SAMPLE_MODE_CYCLED || mode == SAMPLE_MODE_CONTINUOUS);
+    assert(hw.master_enabled);
+    assert(hw.peripheral_calls[0] > hw.sample_mode_calls);
+    assert(hw.peripheral_calls[1] > hw.sample_mode_calls);
+    hw.master_mode = mode;
     ++hw.sample_mode_calls;
     return ICM_20948_STAT_OK;
 }
@@ -227,6 +287,8 @@ static void reset_hw(void)
     hw.now_us = (int64_t)START;
     hw.status_step_us = 250;
     hw.completion_polls = 3;
+    /* Reset LP_CONFIG=0x40; standalone polling tests start in that mode. */
+    hw.master_mode = SAMPLE_MODE_CYCLED;
     hw.ak[AK09916_REG_WIA1] = 0x48;
     hw.ak[AK09916_REG_WIA2] = 0x09;
 }
@@ -322,12 +384,214 @@ static void test_configure(void)
         if (bad < 2) hw.ak[AK09916_REG_WIA1 + bad] ^= 1;
         else hw.bad_mode_readback = true;
         mag = dirty_cache();
-        assert(imu_magnetometer_configure(&hw.device, &mag, false) != ICM_20948_STAT_OK);
+        assert(imu_magnetometer_configure(&hw.device, &mag, false) ==
+               (bad < 2 ? ICM_20948_STAT_WRONG_ID : ICM_20948_STAT_ERR));
         expect_clear(&mag);
         assert(mag.needs_recovery);
-        if (bad < 2) assert(hw.transactions == 2 && hw.delays == 0);
+        if (bad < 2) {
+            assert(hw.transactions == 6 && hw.recovery_delays == 2);
+            assert(hw.master_reset_calls == 2 && hw.master_disable_calls == 2);
+            assert(hw.reset_at_us == 0); /* Never reset/configure an unidentified AK. */
+        } else {
+            assert(hw.transactions == 5 && hw.master_reset_calls == 0);
+        }
     }
     puts("PASS: configure disables SLV0/1, checks AK identity/reset/100Hz readback, clears repeated cache");
+}
+
+static void test_startup_master_recovery(void)
+{
+    for (unsigned dmp = 0; dmp < 2; ++dmp) {
+        for (unsigned resets = 1; resets <= 2; ++resets) {
+            reset_hw();
+            hw.resets_needed = resets;
+            hw.status = DONE; /* Stale success cannot hide boot nonresponse. */
+            imu_magnetometer_t mag = dirty_cache();
+            assert(imu_magnetometer_configure(&hw.device, &mag, dmp) == ICM_20948_STAT_OK);
+            expect_clear(&mag);
+            assert(!mag.needs_recovery && !hw.active && !hw.gate_required);
+            assert(hw.resets_needed == 0 && hw.recovery_stage == 0 && hw.master_enabled);
+            assert(hw.master_reset_calls == resets && hw.master_disable_calls == resets);
+            assert(hw.recovery_delays == resets && hw.master_calls == resets + 1);
+            assert(hw.ctrl_reads == resets + 1 && hw.transactions == resets + 5);
+            for (unsigned i = 0; i < resets; ++i) {
+                assert(hw.trace[i].read && hw.trace[i].reg == AK09916_REG_WIA1);
+                assert(!hw.trace[i].completed);
+            }
+            expect_transaction(resets, AK09916_REG_WIA1, true, 0x48);
+            expect_transaction(resets + 1, AK09916_REG_WIA2, true, 0x09);
+            expect_transaction(resets + 2, AK09916_REG_CNTL3, false, 1);
+            expect_transaction(resets + 3, AK09916_REG_CNTL2, false,
+                               dmp ? 0 : AK09916_MODE_CONT_100_HZ);
+            assert(hw.now_us - (int64_t)START >= (int64_t)resets * 10000);
+            assert(hw.now_us - (int64_t)START < (int64_t)resets * 10000 + 15000);
+        }
+        /* Failure on WIA2 must restart the complete identity probe. */
+        reset_hw();
+        hw.fault_transaction = 2;
+        hw.fault = NACK;
+        imu_magnetometer_t mag = dirty_cache();
+        assert(imu_magnetometer_configure(&hw.device, &mag, dmp) == ICM_20948_STAT_OK);
+        assert(hw.master_reset_calls == 1 && hw.transactions == 7);
+        expect_transaction(0, AK09916_REG_WIA1, true, 0x48);
+        assert(!hw.trace[1].completed && hw.trace[1].reg == AK09916_REG_WIA2);
+        expect_transaction(2, AK09916_REG_WIA1, true, 0x48);
+        expect_transaction(3, AK09916_REG_WIA2, true, 0x09);
+    }
+    puts("PASS: raw/DMP boot nonresponse requires reset+10ms+re-enable+quiescence; third attempt can succeed");
+}
+
+static void test_startup_fault_bounds(void)
+{
+    const unsigned faults[] = { NACK, LOST_ARB, TIMEOUT };
+    for (unsigned dmp = 0; dmp < 2; ++dmp) {
+        for (unsigned f = 0; f < sizeof(faults) / sizeof(faults[0]); ++f) {
+            reset_hw();
+            hw.persistent_fault = faults[f];
+            imu_magnetometer_t mag = dirty_cache();
+            assert(imu_magnetometer_configure(&hw.device, &mag, dmp) == ICM_20948_STAT_ERR);
+            expect_clear(&mag);
+            assert(mag.needs_recovery && !hw.active);
+            assert(hw.transactions == 3 && hw.master_reset_calls == 2);
+            assert(hw.master_disable_calls == 2 && hw.master_calls == 3);
+            assert(hw.recovery_delays == 2 && hw.ctrl_reads == 3);
+            assert(hw.reset_at_us == 0); /* No AK writes before identity succeeds. */
+            assert(hw.now_us - (int64_t)START < 180000);
+            if (faults[f] == TIMEOUT)
+                assert(hw.now_us - (int64_t)START >= 170000); /* 3*50ms + 2*10ms. */
+            for (unsigned i = 0; i < hw.transactions; ++i)
+                assert(!hw.trace[i].completed && hw.trace[i].reg == AK09916_REG_WIA1);
+        }
+        for (unsigned byte = 0; byte < 2; ++byte) {
+            reset_hw();
+            hw.ak[AK09916_REG_WIA1 + byte] ^= 1;
+            imu_magnetometer_t mag = dirty_cache();
+            assert(imu_magnetometer_configure(&hw.device, &mag, dmp) == ICM_20948_STAT_WRONG_ID);
+            assert(hw.transactions == 6 && hw.master_reset_calls == 2);
+            assert(hw.reset_at_us == 0 && mag.needs_recovery);
+            expect_clear(&mag);
+        }
+        /* A proven identity does not license retrying or ignoring reset/mode failures. */
+        for (unsigned transaction = 3; transaction <= 5; ++transaction) {
+            reset_hw();
+            hw.fault_transaction = transaction;
+            hw.fault = NACK;
+            imu_magnetometer_t mag = dirty_cache();
+            assert(imu_magnetometer_configure(&hw.device, &mag, dmp) == ICM_20948_STAT_ERR);
+            assert(hw.transactions == transaction && hw.master_reset_calls == 0);
+            assert(hw.master_disable_calls == 0 && mag.needs_recovery);
+            expect_clear(&mag);
+        }
+        reset_hw();
+        hw.resets_needed = 1;
+        hw.bad_mode_readback = true;
+        imu_magnetometer_t mag = dirty_cache();
+        assert(imu_magnetometer_configure(&hw.device, &mag, dmp) == ICM_20948_STAT_ERR);
+        assert(hw.transactions == 6 && hw.master_reset_calls == 1 && mag.needs_recovery);
+        expect_clear(&mag);
+    }
+    puts("PASS: persistent AUX faults stop at 3 probes/2 resets; wrong identity and reset/mode errors stay fatal");
+}
+
+static void test_startup_timing(void)
+{
+    for (unsigned dmp = 0; dmp < 2; ++dmp) {
+        reset_hw();
+        hw.first_completion_delay_us = 8000;
+        imu_magnetometer_t mag = dirty_cache();
+        assert(imu_magnetometer_configure(&hw.device, &mag, dmp) == ICM_20948_STAT_OK);
+        assert(hw.transactions == 5 && hw.master_reset_calls == 0);
+        assert(hw.now_us - (int64_t)START >= 8000);
+        /* All setup bytes, including reset/mode write/readback, get startup timing. */
+        reset_hw();
+        hw.completion_delay_us = 8000;
+        assert(imu_magnetometer_configure(&hw.device, &mag, dmp) == ICM_20948_STAT_OK);
+        assert(hw.transactions == 5 && hw.master_reset_calls == 0);
+        assert(hw.now_us - (int64_t)START >= 40000);
+        assert(hw.now_us - (int64_t)START < 45000);
+
+        load_axes(1, 2, 3, 0);
+        unsigned count = hw.transactions;
+        int64_t before = hw.now_us;
+        assert(imu_magnetometer_poll(&hw.device, &mag, START) == ICM_20948_STAT_ERR);
+        assert(hw.transactions == count + 1 && !hw.trace[count].completed);
+        assert(hw.now_us - before >= 5000 && hw.now_us - before <= 5250);
+        assert(!mag.valid && mag.needs_recovery && hw.master_reset_calls == 0);
+    }
+    reset_hw();
+    hw.first_completion_delay_us = 8000;
+    imu_magnetometer_t mag = {0};
+    assert(imu_magnetometer_poll(&hw.device, &mag, START) == ICM_20948_STAT_ERR);
+    assert(hw.transactions == 1 && !hw.trace[0].completed);
+    assert(hw.now_us - (int64_t)START >= 5000 && hw.now_us - (int64_t)START <= 5250);
+    puts("PASS: 8ms first/all startup completions succeed without reset; streaming still rejects at 5ms");
+}
+
+static void test_master_scheduling(void)
+{
+    for (unsigned dmp = 0; dmp < 2; ++dmp) {
+        reset_hw();
+        /* Configuration must restore cycled scheduling even if an earlier
+         * reader left the master in the hardware-failing continuous mode. */
+        hw.master_mode = SAMPLE_MODE_CONTINUOUS;
+        imu_magnetometer_t mag = dirty_cache();
+        assert(imu_magnetometer_configure(&hw.device, &mag, dmp) == ICM_20948_STAT_OK);
+        assert(hw.master_mode == SAMPLE_MODE_CYCLED && hw.master_reset_calls == 0);
+
+        /* A later mode regression must stall real reader polling, with no
+         * fabricated DONE/NACK; the existing streaming deadline cancels it. */
+        hw.master_mode = SAMPLE_MODE_CONTINUOUS;
+        load_axes(123, -456, 789, 0);
+        unsigned count = hw.transactions;
+        int64_t before = hw.now_us;
+        assert(imu_magnetometer_poll(&hw.device, &mag, START) == ICM_20948_STAT_ERR);
+        assert(hw.transactions == count + 1 && !hw.trace[count].completed);
+        assert(!mag.valid && mag.needs_recovery && !hw.active);
+        assert(hw.now_us - before >= 5000 && hw.now_us - before <= 5250);
+
+        hw.master_mode = SAMPLE_MODE_CYCLED;
+        count = hw.transactions;
+        assert(imu_magnetometer_poll(&hw.device, &mag, START + 10000) == ICM_20948_STAT_OK);
+        expect_ready_trace(count);
+        assert(mag.valid && !mag.needs_recovery && !mag.needs_release);
+        assert(mag.x == 123 && mag.y == -456 && mag.z == 789);
+    }
+    puts("PASS: configure restores cycled master scheduling; continuous mode stalls SLV4 and cycled mode resumes");
+}
+
+static void test_recovery_host_errors(void)
+{
+    reset_hw();
+    hw.resets_needed = 1;
+    imu_magnetometer_t mag = {0};
+    assert(imu_magnetometer_configure(&hw.device, &mag, false) == ICM_20948_STAT_OK);
+    unsigned calls[5];
+    memcpy(calls, hw.recovery_host_calls, sizeof(calls));
+    for (unsigned i = 0; i < sizeof(calls) / sizeof(calls[0]); ++i) {
+        assert(calls[i]);
+        reset_hw();
+        hw.resets_needed = 1;
+        hw.fail_host = calls[i];
+        mag = dirty_cache();
+        assert(imu_magnetometer_configure(&hw.device, &mag, false) == HOST_ERROR);
+        assert(hw.host_calls == calls[i]); /* No retry after a recovery API/host error. */
+        assert(hw.master_disable_calls <= 1 && hw.master_reset_calls <= 1);
+        assert(hw.device._last_bank == 255 && mag.needs_recovery);
+        expect_clear(&mag);
+    }
+    for (unsigned api = 1; api <= 3; ++api) {
+        reset_hw();
+        hw.resets_needed = 1;
+        hw.fail_recovery_api = api;
+        hw.recovery_api_error = ICM_20948_STAT_ERR;
+        mag = dirty_cache();
+        assert(imu_magnetometer_configure(&hw.device, &mag, false) == ICM_20948_STAT_ERR);
+        assert(hw.transactions == 1 && hw.master_disable_calls == 1);
+        assert(hw.master_reset_calls <= 1 && hw.device._last_bank == 255);
+        assert(mag.needs_recovery);
+        expect_clear(&mag);
+    }
+    puts("PASS: disable/reset/re-enable/requiesce host errors propagate immediately; failed recovery APIs are checked");
 }
 
 static void test_dmp_configure(void)
@@ -458,6 +722,7 @@ static void test_host_errors(void)
                 imu_magnetometer_configure(&hw.device, &mag, false) :
                 imu_magnetometer_poll(&hw.device, &mag, START);
             assert(status == HOST_ERROR && hw.host_calls >= fail);
+            assert(hw.master_reset_calls == 0 && hw.master_disable_calls == 0);
             assert(!mag.valid && !mag.overflow && mag.needs_recovery);
             if (configure) expect_clear(&mag);
             if (hw.bank_error_pending) assert(hw.device._last_bank == 255);
@@ -484,11 +749,25 @@ static void test_bus_errors_and_stale_done(void)
             icm20948_status_e status = configure ?
                 imu_magnetometer_configure(&hw.device, &mag, false) :
                 imu_magnetometer_poll(&hw.device, &mag, START);
-            assert(status != ICM_20948_STAT_OK && !mag.valid && !mag.overflow);
-            assert(mag.needs_recovery);
-            assert(hw.transactions == 1 && hw.cancels == 1 + configure && !hw.active);
             assert(!hw.trace[0].completed);
-            if (faults[i] == TIMEOUT) {
+            assert(!mag.valid && !mag.overflow && !hw.active);
+            if (configure) {
+                assert(status == ICM_20948_STAT_OK && !mag.needs_recovery);
+                assert(hw.transactions == 6 && hw.master_reset_calls == 1);
+                assert(hw.master_disable_calls == 1 && hw.recovery_delays == 1);
+                expect_transaction(1, AK09916_REG_WIA1, true, 0x48);
+                expect_transaction(2, AK09916_REG_WIA2, true, 0x09);
+                assert(hw.cancels == 3 && hw.ctrl_reads == 2);
+                if (faults[i] == TIMEOUT) {
+                    assert(hw.now_us - before >= 60000 && hw.now_us - before < 70000);
+                    assert(hw.status_reads < 230);
+                }
+            } else {
+                assert(status != ICM_20948_STAT_OK && mag.needs_recovery);
+                assert(hw.transactions == 1 && hw.cancels == 1);
+                assert(hw.master_reset_calls == 0 && hw.master_disable_calls == 0);
+            }
+            if (!configure && faults[i] == TIMEOUT) {
                 /* This deliberately times out the FIRST byte: its 5ms
                  * deadline is distinct from the 20ms acquisition budget. */
                 assert(hw.now_us - before >= 5000 && hw.now_us - before <= 6000);
@@ -504,7 +783,7 @@ static void test_bus_errors_and_stale_done(void)
     assert(imu_magnetometer_poll(&hw.device, &mag, START) == ICM_20948_STAT_OK);
     assert(hw.transactions == 9 && hw.status_reads == 36);
     assert(mag.valid && mag.x == -100 && mag.y == 200 && mag.z == -300);
-    puts("PASS: NACK/lost arbitration (even with DONE), bounded timeout, stale DONE cannot complete new byte");
+    puts("PASS: startup recovers one-shot AUX faults; streaming faults retain 5ms bound; stale DONE is drained");
 }
 
 static void test_acquisition_budget(void)
@@ -683,6 +962,11 @@ int main(void)
     _Static_assert(IMU_MAG_POLL_PERIOD_US == 10000, "100Hz polling contract");
     test_configure();
     test_dmp_configure();
+    test_startup_master_recovery();
+    test_startup_fault_bounds();
+    test_startup_timing();
+    test_master_scheduling();
+    test_recovery_host_errors();
     test_ready_and_throttle();
     test_not_ready_and_freshness();
     test_overflow_and_update();

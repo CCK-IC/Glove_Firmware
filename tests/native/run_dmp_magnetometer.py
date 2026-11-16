@@ -40,9 +40,12 @@ typedef int esp_err_t;
 const char *esp_err_to_name(esp_err_t error);
 ''',
     'esp_log.h': '''#pragma once
-#define ESP_LOGE(tag, ...) ((void)(tag))
-#define ESP_LOGW(tag, ...) ((void)(tag))
-#define ESP_LOGI(tag, ...) ((void)(tag))
+static inline void test_log(const char *tag, const char *format, ...) {
+    (void)tag; (void)format;
+}
+#define ESP_LOGE(...) test_log(__VA_ARGS__)
+#define ESP_LOGW(...) test_log(__VA_ARGS__)
+#define ESP_LOGI(...) test_log(__VA_ARGS__)
 ''',
     'esp_timer.h': '#pragma once\n#include <stdint.h>\nint64_t esp_timer_get_time(void);\n',
     'esp_rom_sys.h': '#pragma once\n#include <stdint.h>\nvoid esp_rom_delay_us(uint32_t us);\n',

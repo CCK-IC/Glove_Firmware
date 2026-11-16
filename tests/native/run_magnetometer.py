@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Compile the real magnetometer reader against managed headers; run ASan/UBSan."""
+import argparse
 import os
 from pathlib import Path
 import shlex
@@ -8,7 +9,12 @@ import tempfile
 
 
 def main():
-    root = Path(__file__).resolve().parents[2]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--source-root", type=Path, default=Path(__file__).resolve().parents[2],
+        help="Firmware root to compile; the regression C file stays beside this runner.",
+    )
+    root = parser.parse_args().source_root.resolve()
     managed = root / "managed_components" / "cybergear-robotics__icm20948"
     if not (managed / "icm20948.h").is_file():
         raise SystemExit(f"Missing actual managed driver header: {managed / 'icm20948.h'}")
@@ -16,6 +22,15 @@ def main():
         "sdkconfig.h": "#pragma once\n#define CONFIG_AUX_ADC_ENABLED 0\n",
         "esp_timer.h": "#pragma once\n#include <stdint.h>\nint64_t esp_timer_get_time(void);\n",
         "esp_rom_sys.h": "#pragma once\n#include <stdint.h>\nvoid esp_rom_delay_us(uint32_t us);\n",
+        # Consume arguments so -Werror still checks production format strings
+        # and variables used only by ESP logging remain referenced.
+        "esp_log.h": (
+            "#pragma once\n#include <stdio.h>\n"
+            "#define ESP_LOGE(tag, ...) do { (void)(tag); "
+            "if (0) (void)fprintf(stderr, __VA_ARGS__); } while (0)\n"
+            "#define ESP_LOGW(tag, ...) ESP_LOGE(tag, __VA_ARGS__)\n"
+            "#define ESP_LOGI(tag, ...) ESP_LOGE(tag, __VA_ARGS__)\n"
+        ),
     }
     with tempfile.TemporaryDirectory(prefix="glove-magnetometer-") as temp:
         directory = Path(temp)

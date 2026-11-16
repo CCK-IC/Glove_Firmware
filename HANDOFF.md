@@ -1,5 +1,43 @@
 # Firmware handoff
 
+## Magnetometer startup recovery — firmware 1.3.1, 2026-11-16
+
+- Hardware diagnosis confirmed SLV4 remained armed (`CTRL=0x80`) with
+  `MST_STATUS=0x00` when `I2C_MST_CYCLE` was cleared. Longer timeouts, auxiliary
+  resets and a gyro-filter change did not restore completion. Selecting
+  `SAMPLE_MODE_CYCLED` for the auxiliary master restored identity `0x4809` on
+  the first attempt, with the original gyro settings retained.
+- The AK09916 still runs in continuous 100 Hz measurement mode (`CNTL2=0x08`)
+  for raw sampling. Cycled master scheduling controls the ICM's auxiliary
+  engine, separately from the magnetometer's measurement mode. DMP setup
+  retains ownership of its SLV0/SLV1 layout.
+- Startup allows 50 ms per SLV4 byte, separately from the streaming 5 ms byte /
+  20 ms poll budgets. Failed identity probes retry at most three times, with
+  a checked auxiliary reset, re-enable and 10 ms settling interval. Identity
+  and mode checks remain strict. Error logs include the failing call/register,
+  phase, MST status and elapsed time. Temporary register dumps were removed.
+- The bounded reset/retry follows the
+  [upstream startup sequence](https://github.com/sparkfun/SparkFun_ICM-20948_ArduinoLibrary/blob/main/src/ICM_20948.cpp).
+  Cycled scheduling is backed by the attached board's comparison test, rather
+  than an assumption that a longer timeout resolves this failure.
+- Verification on the USB-connected XIAO ESP32-C3 (`XIAO-IMU-RAW-75F2`):
+  the final 1.3.1 image passed three consecutive boots, each finding identity
+  `0x4809` on attempt 1, accepting raw mode `0x08` and starting the app.
+  Ten-second diagnostic windows reported no raw drops or I2C/FIFO errors.
+- A 30-second macOS BLE test negotiated MTU 128 and received 1,616 full raw
+  V1 packets. All 1,616 had MAG_VALID set (`flags=0x1f`), none had overflow,
+  and none contained an all-zero vector. There were 631 distinct magnetic
+  vectors; X/Y/Z count ranges were 233..266, 30..69 and -271..-240. The
+  connection stayed active; dropped-notification, FIFO and I2C counters stayed
+  at zero. This validates delivery/validity, rather than magnetic calibration.
+- Both complete ESP32-C3 raw and managed-DMP+raw builds passed, alongside
+  the ten configuration checks and raw/DMP ASan/UBSan suites. The regression
+  bus model reproduces the continuous-master stall; restoring that mode as a
+  mutation makes the test fail. DMP on physical hardware remains untested.
+- Validation details are stored in
+  [tests/hardware/magnetometer_1.3.1_2026-11-16.json](tests/hardware/magnetometer_1.3.1_2026-11-16.json).
+
+
 ## Magnetometer validity — firmware 1.3.0, 2026-11-11
 
 - Branch `codex/v1.3.0` starts from `codex/v1.2.0` (`e67e90b`). The BLE

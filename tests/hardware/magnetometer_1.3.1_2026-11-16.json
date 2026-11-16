@@ -1,0 +1,82 @@
+{
+  "test_date": "2026-11-16",
+  "firmware": "1.3.1",
+  "board": "Seeed XIAO ESP32-C3",
+  "fix": "Use cycled auxiliary-master scheduling for SLV4",
+  "boots": [
+    {
+      "boot": 1,
+      "identity_ok": true,
+      "mode_ok": true,
+      "app_started": true,
+      "init_error": false
+    },
+    {
+      "boot": 2,
+      "identity_ok": true,
+      "mode_ok": true,
+      "app_started": true,
+      "init_error": false
+    },
+    {
+      "boot": 3,
+      "identity_ok": true,
+      "mode_ok": true,
+      "app_started": true,
+      "init_error": false
+    }
+  ],
+  "ble": {
+    "device": "XIAO-IMU-RAW-75F2",
+    "before": {
+      "firmware": "1.3.1",
+      "imu_state": 2,
+      "mtu": 128,
+      "drops": 0,
+      "fifo": 0,
+      "i2c_errors": 0
+    },
+    "after": {
+      "firmware": "1.3.1",
+      "imu_state": 2,
+      "mtu": 128,
+      "drops": 0,
+      "fifo": 0,
+      "i2c_errors": 0
+    },
+    "duration_s": 30,
+    "packets": 1616,
+    "invalid_format": 0,
+    "connected_throughout": true,
+    "mag_valid": 1616,
+    "mag_overflow": 0,
+    "zero_vectors": 0,
+    "unique_vectors": 631,
+    "axis_min": [
+      233,
+      30,
+      -271
+    ],
+    "axis_max": [
+      266,
+      69,
+      -240
+    ],
+    "flags": [
+      31
+    ]
+  },
+  "builds": [
+    "ESP32-C3 raw",
+    "ESP32-C3 managed DMP + raw"
+  ],
+  "checks": [
+    "Raw magnetometer ASan/UBSan",
+    "DMP integration ASan/UBSan",
+    "Ten configuration syntax variants"
+  ],
+  "limitations": [
+    "No magnetic calibration validation",
+    "DMP not tested on physical hardware"
+  ]
+}

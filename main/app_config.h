@@ -3,7 +3,7 @@
 #define APP_NAME             "xiao-imu-ble"
 #define APP_VERSION_MAJOR    1
 #define APP_VERSION_MINOR    3
-#define APP_VERSION_PATCH    0
+#define APP_VERSION_PATCH    1
 #define APP_DEVICE_NAME      "XIAO-IMU-RAW"
 #define APP_EVENT_QUEUE_LEN  16
 

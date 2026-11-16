@@ -6,6 +6,11 @@ register bus. It requires the ICM20948 managed dependency to be installed.
 The sanitizer-backed checks cover initialization, mode/identity checks,
 DRDY/data/ST2 ordering, signed vectors, freshness, overflow, transaction errors,
 timeouts, partial-read recovery and preservation of unrelated packet flags.
+Startup checks additionally model delayed auxiliary completion, a master that
+only recovers after reset, bounded persistent failures and strict identity/mode
+rejection. Startup budgets are independent of streaming budgets. The bus model requires
+cycled auxiliary scheduling: continuous master mode leaves SLV4 armed without
+completion, matching the hardware regression.
 Run `python3 tests/native/run_dmp_magnetometer.py` to check the actual IMU
 manager's Compass-only and quaternion frames, latest-frame selection, raw DMP
 publication, freshness, backlog/time budgets, transport errors, partial frames
