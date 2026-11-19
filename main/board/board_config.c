@@ -83,6 +83,12 @@ esp_err_t board_config_validate(void)
     return ESP_OK;
 }
 
+void board_i2c_line_levels(int *scl, int *sda)
+{
+    *scl = gpio_get_level((gpio_num_t)BOARD_I2C_SCL_GPIO);
+    *sda = gpio_get_level((gpio_num_t)BOARD_I2C_SDA_GPIO);
+}
+
 esp_err_t board_config_init(void)
 {
     esp_err_t err = board_config_validate();

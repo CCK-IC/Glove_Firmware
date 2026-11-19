@@ -1,5 +1,62 @@
 # Firmware handoff
 
+## I²C recovery and ADC rate — firmware 1.4.1, 2026-11-19
+
+- The first IMU initialization uses the 1.4.0 sequence and configured clock.
+  After a startup failure, the firmware starts BLE and ADC and retries IMU
+  initialization up to three times at a clock capped at 100 kHz.
+- Runtime I²C recovery arms after the first valid hardware sample. A timeout
+  or five consecutive failures by default schedules a bus reset. The firmware
+  verifies the IMU's identity and power state, then attempts full
+  reinitialization if that check fails. BLE and ADC remain active.
+- Protocol v3 control opcode `0x08` sets the ADC rate independently of the
+  IMU. The device reports the measured ADC rate with AUX samples.
+- On the XIAO ESP32-C3, a full power cycle restored IMU startup after repeated
+  register failures. A later run observed failed register reads and a
+  bank-select write, followed by resumed BLE motion samples on the same boot.
+  The stream also survived a 45/90/45 Hz rate change and a reconnect. Measured
+  IMU rates fell below the request at 90 and 100 Hz. Stuck-bus recovery still
+  needs a controlled hardware test.
+
+## Fixed-slot sensor batches — firmware 1.4.0, 2026-11-16
+
+- The 1.4.0 validation used working changes based on `efa7c56` and companion
+  app version 1.1.0+2.
+- Raw IMU, Q30 quaternion, AUX and status now use protocol v3, with unchanged
+  UUIDs and commands. Both glove slots are physically present; reserved slot1
+  metadata/payload are zero with presence mask1. No interglove communication
+  is implemented. [Wire specification](docs/BATCH_PROTOCOL_V3.md).
+- Preferred MTU 247: four raw records in 220 bytes. Batches retain exact u32
+  timestamps/sequences and compact deltas; queues capture every accepted sample
+  instead of periodically reading only latest caches. All accepted DMP FIFO
+  quaternions are published after the device lock is released. Existing
+  magnetometer initialization/recovery remains intact.
+- Queues hold 64 records per raw/DMP/AUX stream. Flush at 80 ms or capacity;
+  overflow drops oldest unread samples with a counter. NimBLE-host events
+  serialize enqueue against GAP/CCC changes, retain transient failures for up
+  to 500 ms, and rotate five streams with a six-attempt work budget. Epoch and
+  connection generation fences prevent stale replay. MTU 23 uses ordered
+  fragments; payload sizes and reassembly bounds are documented.
+- Independent review added deterministic sender race tests. A live-test
+  measured-rate metadata rejection was fixed by splitting raw batches before
+  rate changes; regression coverage includes that boundary.
+- Full C3 raw and managed DMP+raw builds and all ten feature syntax variants
+  pass. The board retains the tested raw image. Codec, sample
+  queue, sender, ADC/state and raw/DMP magnetic regressions pass ASan/UBSan.
+  Cross-language C goldens validate all fields through Dart decoders and MTU 23
+  reassembly. App: 110 VM tests and 45 selected Chrome tests pass, with clean
+  analysis and a successful web release build.
+- Final raw image flashed to `XIAO-IMU-RAW-75F2`; MTU 247 live test at requested
+  45/90/200/45 Hz (15 sec each) received 3,632 raw samples/963 notifications and
+  5,870 dummy ADC samples/1,174 notifications. No gaps, malformed frames,
+  disconnects or new notification/sample/FIFO/I2C losses. All magnetic valid
+  flags and absent-slot/inactive-channel zeros passed. Resubscribe and
+  reconnect tests received only fresh records and no sequence gaps.
+- [Exact hardware results](tests/hardware/batch_v3_1.4.0_2026-11-16.json) record
+  binary SHA256. [Validation scope](docs/VALIDATION_V3.md) distinguishes physical
+  raw IMU from dummy AUX. Physical DMP, electrical ADC, MTU 23 hardware and
+  Windows and other OS BLE runs remain unverified.
+
 ## Magnetometer startup recovery — firmware 1.3.1, 2026-11-16
 
 - Hardware diagnosis confirmed SLV4 remained armed (`CTRL=0x80`) with

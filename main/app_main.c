@@ -14,6 +14,7 @@
 #include "led/led_manager.h"
 #include "power/power_manager.h"
 #include "ble/ble_manager.h"
+#include "ble/ble_sample_buffer.h"
 #include "diagnostics/diagnostics.h"
 
 static const char *TAG = "app";
@@ -121,6 +122,7 @@ void app_main(void)
 
     ESP_ERROR_CHECK(system_state_init());
     ESP_ERROR_CHECK(app_events_init());
+    ESP_ERROR_CHECK(ble_sample_buffer_init());
     ESP_ERROR_CHECK(board_config_init());
     ESP_ERROR_CHECK(power_manager_init());
 
@@ -133,22 +135,12 @@ void app_main(void)
     ESP_ERROR_CHECK(battery_manager_init());
     ESP_ERROR_CHECK(battery_manager_start());
 
-    err = imu_manager_init();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "IMU initialization failed: %s", esp_err_to_name(err));
-        system_state_set_error("imu", err);
-#if !CONFIG_IMU_SYNTHETIC_FALLBACK
-        /* Keep the disconnected shutdown active even when sensor startup fails.
-         * No acquisition/host tasks are running on this path. */
-        ESP_ERROR_CHECK(power_manager_start());
-        return;
-#endif
-    }
-    ESP_ERROR_CHECK(imu_manager_start());
+    ESP_ERROR_CHECK(imu_manager_init());
     ESP_ERROR_CHECK(adc_manager_init());
     ESP_ERROR_CHECK(adc_manager_start());
     ESP_ERROR_CHECK(ble_manager_init());
     ESP_ERROR_CHECK(ble_manager_start());
+    ESP_ERROR_CHECK(imu_manager_start());
     ESP_ERROR_CHECK(button_manager_start());
     ESP_ERROR_CHECK(diagnostics_start());
 

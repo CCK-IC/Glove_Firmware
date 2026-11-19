@@ -1,0 +1,275 @@
+{
+  "continuous": {
+    "notifications": {
+      "1": 963,
+      "3": 1174,
+      "4": 235
+    },
+    "frames": {
+      "1": 963,
+      "3": 1174,
+      "4": 235
+    },
+    "samples": {
+      "1": 3632,
+      "3": 5870
+    },
+    "batch_sizes": {
+      "1": {
+        "4": 786,
+        "3": 148,
+        "2": 15,
+        "1": 14
+      },
+      "3": {
+        "5": 1174
+      }
+    },
+    "sequence_gaps": {
+      "1": 0,
+      "3": 0
+    },
+    "errors": [],
+    "statuses": [
+      {
+        "uptime": 87970,
+        "rate": 45,
+        "sensor_rate": 45,
+        "packet_rate": 11,
+        "mtu": 247,
+        "firmware": [
+          1,
+          4,
+          0
+        ],
+        "drops": 0,
+        "fifo": 0,
+        "i2c": 0,
+        "sample_drops": 0,
+        "acquired": 5548
+      },
+      {
+        "uptime": 88240,
+        "rate": 45,
+        "sensor_rate": 45,
+        "packet_rate": 11,
+        "mtu": 247,
+        "firmware": [
+          1,
+          4,
+          0
+        ],
+        "drops": 0,
+        "fifo": 0,
+        "i2c": 0,
+        "sample_drops": 0,
+        "acquired": 5561
+      }
+    ]
+  },
+  "before": {
+    "uptime": 27340,
+    "rate": 100,
+    "sensor_rate": 73,
+    "packet_rate": 0,
+    "mtu": 247,
+    "firmware": [
+      1,
+      4,
+      0
+    ],
+    "drops": 0,
+    "fifo": 0,
+    "i2c": 0,
+    "sample_drops": 0,
+    "acquired": 1905
+  },
+  "after": {
+    "uptime": 88230,
+    "rate": 45,
+    "sensor_rate": 45,
+    "packet_rate": 11,
+    "mtu": 247,
+    "firmware": [
+      1,
+      4,
+      0
+    ],
+    "drops": 0,
+    "fifo": 0,
+    "i2c": 0,
+    "sample_drops": 0,
+    "acquired": 5560
+  },
+  "resubscribe": {
+    "notifications": {
+      "1": 51,
+      "3": 79,
+      "4": 16
+    },
+    "frames": {
+      "1": 51,
+      "3": 79,
+      "4": 16
+    },
+    "samples": {
+      "1": 182,
+      "3": 395
+    },
+    "batch_sizes": {
+      "1": {
+        "4": 32,
+        "3": 17,
+        "1": 1,
+        "2": 1
+      },
+      "3": {
+        "5": 79
+      }
+    },
+    "sequence_gaps": {
+      "1": 0,
+      "3": 0
+    },
+    "errors": [],
+    "statuses": [
+      {
+        "uptime": 92650,
+        "rate": 45,
+        "sensor_rate": 45,
+        "packet_rate": 12,
+        "mtu": 247,
+        "firmware": [
+          1,
+          4,
+          0
+        ],
+        "drops": 0,
+        "fifo": 0,
+        "i2c": 0,
+        "sample_drops": 0,
+        "acquired": 5759
+      },
+      {
+        "uptime": 92910,
+        "rate": 45,
+        "sensor_rate": 45,
+        "packet_rate": 11,
+        "mtu": 247,
+        "firmware": [
+          1,
+          4,
+          0
+        ],
+        "drops": 0,
+        "fifo": 0,
+        "i2c": 0,
+        "sample_drops": 0,
+        "acquired": 5771
+      }
+    ]
+  },
+  "reconnect": {
+    "notifications": {
+      "1": 91,
+      "3": 98,
+      "4": 19
+    },
+    "frames": {
+      "1": 91,
+      "3": 98,
+      "4": 19
+    },
+    "samples": {
+      "1": 359,
+      "3": 490
+    },
+    "batch_sizes": {
+      "1": {
+        "4": 88,
+        "2": 2,
+        "3": 1
+      },
+      "3": {
+        "5": 98
+      }
+    },
+    "sequence_gaps": {
+      "1": 0,
+      "3": 0
+    },
+    "errors": [],
+    "statuses": [
+      {
+        "uptime": 100340,
+        "rate": 100,
+        "sensor_rate": 67,
+        "packet_rate": 17,
+        "mtu": 247,
+        "firmware": [
+          1,
+          4,
+          0
+        ],
+        "drops": 0,
+        "fifo": 0,
+        "i2c": 0,
+        "sample_drops": 0,
+        "acquired": 6304
+      },
+      {
+        "uptime": 100600,
+        "rate": 100,
+        "sensor_rate": 67,
+        "packet_rate": 17,
+        "mtu": 247,
+        "firmware": [
+          1,
+          4,
+          0
+        ],
+        "drops": 0,
+        "fifo": 0,
+        "i2c": 0,
+        "sample_drops": 0,
+        "acquired": 6325
+      }
+    ]
+  },
+  "validation": {
+    "release": "1.4.0",
+    "app_version": "1.1.0+2",
+    "date": "2026-11-16",
+    "branch": "codex/batched-sensor-packets-v1.4.0",
+    "firmware_base": "efa7c56",
+    "app_base": "7f969dc",
+    "binary_sha256": "72428138558228a92b6bd76a29be6b2edd7b13ec7e4079150f76a587b1b53a67",
+    "device": "XIAO-IMU-RAW-75F2",
+    "board": "XIAO ESP32-C3",
+    "imu": "real ICM-20948 / AK09916",
+    "aux": "dummy 3-channel, configured 100Hz",
+    "client": "macOS CoreBluetooth / Bleak harness",
+    "requested_rates_hz": [
+      45,
+      90,
+      200,
+      45
+    ],
+    "seconds_per_rate": 15,
+    "checks": [
+      "reserved peer metadata/payload zero",
+      "inactive AUX values zero",
+      "all raw magnetic valid/no overflow",
+      "one-row GATT snapshots",
+      "one-byte standard battery",
+      "acknowledged rate commands confirmed through status",
+      "no sequence gaps",
+      "no new loss/FIFO/I2C counters",
+      "fresh data after resubscribe/reconnect"
+    ],
+    "limitations": [
+      "not a Flutter hardware UI test",
+      "physical DMP/electrical ADC/other OS hardware/small MTU link not tested"
+    ]
+  }
+}

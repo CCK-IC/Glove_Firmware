@@ -573,13 +573,14 @@ mainmenu "Project configuration"
             default 3
 
         config IMU_ERROR_REINIT_COUNT
-            int "Consecutive FIFO errors before degraded status"
+            int "Consecutive IMU errors before recovery or degraded status"
             depends on IMU_ENABLED
             range 1 100
             default 5
             help
-                FIFO read errors always reset the FIFO to restore frame alignment.
-                This threshold controls when repeated failures mark the IMU degraded.
+                After the first valid hardware sample, repeated I2C errors or
+                a single timeout trigger runtime bus recovery. Repeated FIFO
+                errors mark the IMU degraded and use FIFO reset to restore alignment.
 
         config IMU_DMP_ENABLED
             bool "Enable managed-component DMP integration"

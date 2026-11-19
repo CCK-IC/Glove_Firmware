@@ -26,6 +26,8 @@
 #include "imu/imu_manager.h"
 #include "adc/adc_manager.h"
 #include "ble_packets.h"
+#include "ble_batch_packets.h"
+#include "ble_sample_buffer.h"
 #include "ble_uuid.h"
 #include "gatt_server.h"
 
@@ -41,6 +43,43 @@ static atomic_uint s_connection_generation;
 static int64_t s_pairing_deadline_us;
 static int64_t s_connection_update_due_us;
 static bool s_connection_update_attempted;
+
+enum { BATCH_FLUSH_MS = 80, BATCH_RETRY_MS = 500, TX_BUDGET = 6,
+       ATT_MBUF_RESERVE = 4,
+       STREAM_STATUS = 4, STREAM_BATTERY = 5, STREAM_COUNT = 5 };
+
+typedef struct {
+    uint8_t data[BLE_BATCH_MAX_FRAME_SIZE];
+    size_t length;
+    size_t samples;
+    unsigned kind;
+    uint16_t handle;
+    uint16_t mtu;
+    uint16_t frame_id;
+    unsigned fragment;
+    uint32_t epoch;
+    unsigned generation;
+    int64_t created_us;
+} pending_frame_t;
+
+static pending_frame_t s_pending[STREAM_COUNT];
+static uint16_t s_frame_ids[STREAM_COUNT];
+static struct ble_npl_event s_tx_event;
+static SemaphoreHandle_t s_tx_ack;
+static bool s_tx_pending; /* Owned only by the notification task. */
+static atomic_bool s_tx_done;
+static atomic_int s_tx_result;
+static struct {
+    uint8_t data[BLE_BATCH_MAX_FRAME_SIZE];
+    uint16_t length;
+    uint16_t handle;
+    uint16_t frame_id;
+    unsigned kind;
+    unsigned fragment;
+    unsigned generation;
+    uint32_t epoch;
+    int64_t deadline_us;
+} s_tx_job;
 
 static const char *hci_reason_name(int reason)
 {
@@ -201,27 +240,20 @@ static int handle_gap_event(struct ble_gap_event *event, void *arg)
             return 0;
         }
 
+        state.mtu = ble_att_mtu(event->connect.conn_handle);
+        if (state.mtu < 23) state.mtu = 23;
         xSemaphoreTake(s_connection_lock, portMAX_DELAY);
         s_connection_handle = event->connect.conn_handle;
         s_connection_update_due_us = 0;
         s_connection_update_attempted = false;
-        xSemaphoreGive(s_connection_lock);
-
-        state.conn_handle = event->connect.conn_handle;
-        SYSTEM_STATE_SET(conn_handle, state.conn_handle);
-        system_state_set_ble_connected(true);
-        state.advertising = false;
-        SYSTEM_STATE_SET(advertising, state.advertising);
-        state.encrypted = false;
-        SYSTEM_STATE_SET(encrypted, state.encrypted);
-        state.bonded = false;
-        SYSTEM_STATE_SET(bonded, state.bonded);
-        state.mtu = ble_att_mtu(event->connect.conn_handle);
+        SYSTEM_STATE_SET(conn_handle, s_connection_handle);
         SYSTEM_STATE_SET(mtu, state.mtu);
-        if (state.mtu < 23) {
-            state.mtu = 23;
-            SYSTEM_STATE_SET(mtu, state.mtu);
-        }
+        SYSTEM_STATE_SET(advertising, false);
+        SYSTEM_STATE_SET(encrypted, false);
+        SYSTEM_STATE_SET(bonded, false);
+        system_state_set_ble_connected(true);
+        atomic_fetch_add(&s_connection_generation, 1);
+        xSemaphoreGive(s_connection_lock);
 
         log_connection("connected", event->connect.conn_handle);
 
@@ -250,10 +282,27 @@ static int handle_gap_event(struct ble_gap_event *event, void *arg)
             xSemaphoreGive(s_connection_lock);
         }
     #endif
-        atomic_fetch_add(&s_connection_generation, 1);
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
+        xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+        s_connection_handle = BLE_HS_CONN_HANDLE_NONE;
+        s_connection_update_due_us = 0;
+        s_connection_update_attempted = false;
+        atomic_fetch_add(&s_connection_generation, 1);
+        gatt_clear_subscriptions();
+        SYSTEM_STATE_SET(encrypted, false);
+        SYSTEM_STATE_SET(bonded, false);
+        SYSTEM_STATE_SET(conn_handle, UINT16_MAX);
+        SYSTEM_STATE_SET(mtu, 23);
+        SYSTEM_STATE_SET(slow_mode, false);
+        SYSTEM_STATE_SET(requested_imu_rate_hz, APP_IMU_NORMAL_RATE_HZ);
+#if CONFIG_AUX_ADC_ENABLED
+        SYSTEM_STATE_SET(requested_adc_rate_hz, CONFIG_ADC_RATE_HZ);
+#endif
+        system_state_set_ble_connected(false);
+        xSemaphoreGive(s_connection_lock);
+
         ESP_LOGW(TAG,
                 "disconnect reason=0x%04x low-byte=0x%02x (%s)",
                 event->disconnect.reason,
@@ -272,27 +321,6 @@ static int handle_gap_event(struct ble_gap_event *event, void *arg)
                 event->disconnect.conn.sec_state.bonded);
     #endif
 
-        xSemaphoreTake(s_connection_lock, portMAX_DELAY);
-        s_connection_handle = BLE_HS_CONN_HANDLE_NONE;
-        s_connection_update_due_us = 0;
-        s_connection_update_attempted = false;
-        xSemaphoreGive(s_connection_lock);
-        gatt_clear_subscriptions();
-
-        system_state_set_ble_connected(false);
-        state.encrypted = false;
-        SYSTEM_STATE_SET(encrypted, state.encrypted);
-        state.bonded = false;
-        SYSTEM_STATE_SET(bonded, state.bonded);
-        state.conn_handle = UINT16_MAX;
-        SYSTEM_STATE_SET(conn_handle, state.conn_handle);
-        state.mtu = 23;
-        SYSTEM_STATE_SET(mtu, state.mtu);
-        state.slow_mode = false;
-        SYSTEM_STATE_SET(slow_mode, state.slow_mode);
-        state.requested_imu_rate_hz = APP_IMU_NORMAL_RATE_HZ;
-        SYSTEM_STATE_SET(requested_imu_rate_hz, state.requested_imu_rate_hz);
-
         start_advertising();
         return 0;
 
@@ -309,14 +337,23 @@ static int handle_gap_event(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
-        gatt_set_subscription(event->subscribe.attr_handle,
-                              event->subscribe.cur_notify);
+        xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+        /* Matching the handle also accepts bonded CCC restore events. */
+        if (s_connection_handle != BLE_HS_CONN_HANDLE_NONE &&
+            event->subscribe.conn_handle == s_connection_handle) {
+            gatt_set_subscription(event->subscribe.attr_handle,
+                event->subscribe.cur_notify && atomic_load(&s_notifications_enabled));
+        }
+        xSemaphoreGive(s_connection_lock);
         return 0;
 
     case BLE_GAP_EVENT_MTU:
-        state.mtu = event->mtu.value;
-        SYSTEM_STATE_SET(mtu, state.mtu);
-
+        xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+        if (s_connection_handle != BLE_HS_CONN_HANDLE_NONE &&
+            event->mtu.conn_handle == s_connection_handle) {
+            SYSTEM_STATE_SET(mtu, event->mtu.value);
+        }
+        xSemaphoreGive(s_connection_lock);
         return 0;
 
     case BLE_GAP_EVENT_ENC_CHANGE: {
@@ -399,15 +436,16 @@ static void on_reset(int reason)
     s_connection_update_due_us = 0;
     s_connection_update_attempted = false;
     s_pairing_deadline_us = 0;
-    xSemaphoreGive(s_connection_lock);
-    system_state_set_ble_connected(false);
+    atomic_fetch_add(&s_connection_generation, 1);
+    gatt_clear_subscriptions();
     SYSTEM_STATE_SET(conn_handle, UINT16_MAX);
     SYSTEM_STATE_SET(mtu, 23);
     SYSTEM_STATE_SET(advertising, false);
     SYSTEM_STATE_SET(encrypted, false);
     SYSTEM_STATE_SET(bonded, false);
     SYSTEM_STATE_SET(pairing, false);
-    gatt_clear_subscriptions();
+    system_state_set_ble_connected(false);
+    xSemaphoreGive(s_connection_lock);
 }
 
 static void on_sync(void)
@@ -432,15 +470,102 @@ static void host_task(void *arg)
     nimble_port_freertos_deinit();
 }
 
-static int enqueue_notification(uint16_t handle, const void *data, uint16_t len)
+/* Called with the connection lock held, or from the NimBLE host task. */
+static bool stream_is_current(unsigned kind, unsigned generation, uint32_t epoch)
 {
-    xSemaphoreTake(s_connection_lock, portMAX_DELAY);
-    uint16_t connection_handle = s_connection_handle;
-    xSemaphoreGive(s_connection_lock);
-    if (connection_handle == BLE_HS_CONN_HANDLE_NONE) return BLE_HS_ENOTCONN;
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
-    if (!om) return BLE_HS_ENOMEM;
-    return ble_gatts_notify_custom(connection_handle, handle, om);
+    return atomic_load(&s_notifications_enabled) &&
+        s_connection_handle != BLE_HS_CONN_HANDLE_NONE &&
+        generation == atomic_load(&s_connection_generation) &&
+        gatt_stream_subscribed(kind) && epoch == gatt_stream_epoch(kind);
+}
+
+/* This event executes in the NimBLE host context, serialized with connection
+ * and CCC changes. Never hold an application connection lock while entering
+ * NimBLE: the host callback path itself needs that lock. */
+static void notification_host_event(struct ble_npl_event *event)
+{
+    (void)event;
+    int rc = BLE_HS_ENOTCONN;
+    if (stream_is_current(s_tx_job.kind, s_tx_job.generation, s_tx_job.epoch) &&
+        esp_timer_get_time() < s_tx_job.deadline_us) {
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(s_tx_job.data, s_tx_job.length);
+        if (!om) {
+            rc = BLE_HS_ENOMEM;
+        } else if (om->om_omp->omp_pool->mp_num_free < ATT_MBUF_RESERVE) {
+            /* Check the ATT packet's actual pool; MSYS totals can hide an
+             * exhausted small-block pool. Leave space for control traffic. */
+            os_mbuf_free_chain(om);
+            rc = BLE_HS_ENOMEM;
+        } else {
+            /* NimBLE consumes om on both success and failure. */
+            rc = ble_gatts_notify_custom(s_connection_handle, s_tx_job.handle, om);
+        }
+    }
+    atomic_store(&s_tx_result, rc);
+    atomic_store(&s_tx_done, true);
+    xSemaphoreGive(s_tx_ack);
+}
+
+static void finish_host_job(uint32_t *sent_in_window, uint8_t *last_battery)
+{
+    if (!s_tx_pending || !atomic_load(&s_tx_done)) return;
+    int rc = atomic_load(&s_tx_result);
+    s_tx_pending = false;
+    pending_frame_t *frame = &s_pending[s_tx_job.kind - 1];
+    if (!frame->length || frame->frame_id != s_tx_job.frame_id ||
+        frame->fragment != s_tx_job.fragment ||
+        frame->generation != s_tx_job.generation || frame->epoch != s_tx_job.epoch)
+        return; /* A lifecycle boundary invalidated the old job. */
+    if (rc != 0) {
+        xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+        bool current = stream_is_current(frame->kind, frame->generation, frame->epoch);
+        xSemaphoreGive(s_connection_lock);
+        if (!current) {
+            frame->length = 0;
+            return;
+        }
+        static uint32_t failures;
+        if (++failures <= 3 || failures % 100 == 0)
+            ESP_LOGW(TAG, "batch enqueue retry kind=%u rc=%d count=%lu",
+                     frame->kind, rc, (unsigned long)failures);
+        return; /* Keep the exact same fragment for a bounded retry. */
+    }
+    if (frame->kind == BLE_BUFFER_RAW || frame->kind == BLE_BUFFER_DMP)
+        ++*sent_in_window;
+    ++frame->fragment;
+    unsigned fragments = frame->kind == STREAM_BATTERY ? 1 :
+        ble_batch_fragment_count(frame->length, frame->mtu);
+    if (frame->fragment >= fragments) {
+        if (frame->kind == STREAM_BATTERY) *last_battery = frame->data[0];
+        frame->length = 0;
+    }
+}
+
+static bool post_host_job(pending_frame_t *frame)
+{
+    if (s_tx_pending) return false;
+    size_t length;
+    if (frame->kind == STREAM_BATTERY) {
+        s_tx_job.data[0] = frame->data[0];
+        length = 1;
+    } else {
+        length = ble_batch_fragment(s_tx_job.data, sizeof(s_tx_job.data),
+            frame->data, frame->length, frame->mtu, frame->frame_id, frame->fragment);
+    }
+    if (!length) return false;
+    while (xSemaphoreTake(s_tx_ack, 0) == pdTRUE) { }
+    s_tx_job.length = length;
+    s_tx_job.handle = frame->handle;
+    s_tx_job.kind = frame->kind;
+    s_tx_job.frame_id = frame->frame_id;
+    s_tx_job.fragment = frame->fragment;
+    s_tx_job.generation = frame->generation;
+    s_tx_job.epoch = frame->epoch;
+    s_tx_job.deadline_us = frame->created_us + BATCH_RETRY_MS * 1000LL;
+    atomic_store(&s_tx_done, false);
+    s_tx_pending = true;
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_tx_event);
+    return true;
 }
 
 static void check_pairing_timeout(void)
@@ -455,257 +580,195 @@ static void check_pairing_timeout(void)
     xSemaphoreGive(s_connection_lock);
 }
 
+static uint16_t stream_handle(unsigned kind)
+{
+    switch (kind) {
+    case BLE_BUFFER_RAW: return gatt_imu_raw_handle;
+    case BLE_BUFFER_DMP: return gatt_dmp_handle;
+    case BLE_BUFFER_AUX: return gatt_aux_handle;
+    case STREAM_STATUS: return gatt_status_handle;
+    case STREAM_BATTERY: return gatt_battery_handle;
+    default: return 0;
+    }
+}
+
+static void initialize_pending(pending_frame_t *frame, unsigned kind, uint16_t mtu,
+                               unsigned generation, uint32_t epoch, int64_t now_us)
+{
+    frame->kind = kind;
+    frame->handle = stream_handle(kind);
+    frame->mtu = mtu;
+    frame->frame_id = ++s_frame_ids[kind - 1];
+    frame->fragment = 0;
+    frame->generation = generation;
+    frame->epoch = epoch;
+    frame->created_us = now_us;
+}
+
+static void count_stream_loss(unsigned kind, unsigned generation, uint32_t epoch,
+                              size_t sample_count)
+{
+    xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+    if (stream_is_current(kind, generation, epoch)) {
+        ble_sample_buffer_note_dropped(sample_count);
+        SYSTEM_STATE_INCREMENT(dropped_notifications);
+    }
+    xSemaphoreGive(s_connection_lock);
+}
+
+static void prepare_sensor_frame(pending_frame_t *frame, unsigned kind,
+                                  const system_state_t *state, unsigned generation,
+                                  int64_t now_us)
+{
+    ble_sample_buffer_info_t info = ble_sample_buffer_info(kind);
+    if (!info.enabled || !info.count) return;
+    size_t limit = ble_batch_sample_limit(kind, state->mtu);
+    if (!limit) return;
+    uint32_t age_ms = (uint32_t)(now_us / 1000ULL) - info.oldest_timestamp_ms;
+    if (age_ms >= 0x80000000U) age_ms = 0;
+    if (info.count < limit && age_ms < BATCH_FLUSH_MS) return;
+    union {
+        imu_raw_sample_t raw[BLE_BATCH_MAX_SAMPLES];
+        imu_dmp_sample_t dmp[BLE_BATCH_MAX_SAMPLES];
+        adc_sample_t aux[BLE_BATCH_MAX_SAMPLES];
+    } samples;
+    uint32_t epoch;
+    size_t count = 0;
+    xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+    if (!stream_is_current(kind, generation, info.epoch)) {
+        xSemaphoreGive(s_connection_lock);
+        return;
+    }
+    if (kind == BLE_BUFFER_RAW)
+        count = ble_sample_buffer_take_raw(samples.raw, limit, &epoch);
+    else if (kind == BLE_BUFFER_DMP)
+        count = ble_sample_buffer_take_dmp(samples.dmp, limit, &epoch);
+    else if (kind == BLE_BUFFER_AUX)
+        count = ble_sample_buffer_take_aux(samples.aux, limit, &epoch);
+    xSemaphoreGive(s_connection_lock);
+    if (!count) return;
+
+    size_t length;
+    if (kind == BLE_BUFFER_RAW)
+        length = ble_batch_encode_raw(frame->data, sizeof(frame->data), samples.raw, count);
+    else if (kind == BLE_BUFFER_DMP)
+        length = ble_batch_encode_dmp(frame->data, sizeof(frame->data), samples.dmp, count,
+                                      state->actual_dmp_sample_rate_hz);
+    else
+        length = ble_batch_encode_aux(frame->data, sizeof(frame->data), samples.aux, count,
+                                      state->actual_adc_sample_rate_hz);
+    if (!length) {
+        count_stream_loss(kind, generation, epoch, count);
+        return;
+    }
+    initialize_pending(frame, kind, state->mtu, generation, epoch, now_us);
+    frame->length = length;
+    frame->samples = count;
+}
+
 static void notification_task(void *arg)
 {
     (void)arg;
-
-    TickType_t wake = xTaskGetTickCount();
-    uint64_t rate_window_us = esp_timer_get_time();
-    uint64_t status_due_us = rate_window_us;
-#if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY || CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
-    uint64_t next_imu_due_us = 0;
-    uint32_t last_imu_rate_hz = 0;
-#endif
+    int64_t rate_window_us = esp_timer_get_time();
+    int64_t status_due_us = rate_window_us;
     unsigned connection_generation = 0;
-
     uint32_t sent_in_window = 0;
-#if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY
-    uint32_t last_imu_sequence = UINT32_MAX;
-#endif
-#if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
-    uint32_t last_raw_sequence = UINT32_MAX;
-#endif
-#if CONFIG_AUX_ADC_ENABLED
-    uint32_t last_adc_sequence = UINT32_MAX;
-#endif
     uint8_t last_battery = UINT8_MAX;
+    unsigned cursor = 0;
 
     while (true) {
+        finish_host_job(&sent_in_window, &last_battery);
         system_state_t state;
+        xSemaphoreTake(s_connection_lock, portMAX_DELAY);
         system_state_snapshot(&state);
-
+        unsigned generation = atomic_load(&s_connection_generation);
+        bool streaming = atomic_load(&s_notifications_enabled) &&
+            s_connection_handle != BLE_HS_CONN_HANDLE_NONE && state.ble_connected;
+        xSemaphoreGive(s_connection_lock);
         maybe_request_connection_update();
         check_pairing_timeout();
-
-        uint64_t now_us = esp_timer_get_time();
-        unsigned current_generation = atomic_load(&s_connection_generation);
-        if (current_generation != connection_generation) {
-            connection_generation = current_generation;
+        int64_t now_us = esp_timer_get_time();
+        if (generation != connection_generation) {
+            connection_generation = generation;
+            memset(s_pending, 0, sizeof(s_pending));
             last_battery = UINT8_MAX;
             status_due_us = now_us;
-#if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY || CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
-            next_imu_due_us = now_us;
-#endif
-#if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY
-            last_imu_sequence = UINT32_MAX;
-#endif
-#if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
-            last_raw_sequence = UINT32_MAX;
-#endif
-#if CONFIG_AUX_ADC_ENABLED
-            last_adc_sequence = UINT32_MAX;
-#endif
-        }
-
-        uint32_t imu_rate_hz =
-            state.requested_imu_rate_hz ? state.requested_imu_rate_hz : 1;
-        bool streaming = atomic_load(&s_notifications_enabled) && state.ble_connected;
-#if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY || CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
-        if (imu_rate_hz != last_imu_rate_hz) {
-            next_imu_due_us = now_us;
-            last_imu_rate_hz = imu_rate_hz;
-        }
-        bool imu_due = now_us >= next_imu_due_us;
-        if (imu_due) {
-            uint64_t interval_us = 1000000ULL / imu_rate_hz;
-            /* Skip missed intervals while retaining phase across rounded task ticks. */
-            next_imu_due_us += ((now_us - next_imu_due_us) / interval_us + 1) * interval_us;
-        }
-#endif
-        uint32_t poll_rate_hz = 10; /* Remain responsive without polling idle streams. */
-        if (state.ble_connected && state.status_period_ms > 0 &&
-            (gatt_status_subscribed() || gatt_battery_subscribed())) {
-            uint32_t status_rate_hz = (1000U + state.status_period_ms - 1) /
-                                      state.status_period_ms;
-            if (status_rate_hz > poll_rate_hz) poll_rate_hz = status_rate_hz;
-        }
-        if (streaming) {
-            if (gatt_dmp_subscribed() || gatt_imu_raw_subscribed())
-                poll_rate_hz = imu_rate_hz > poll_rate_hz ? imu_rate_hz : poll_rate_hz;
-#if CONFIG_AUX_ADC_ENABLED
-            if (gatt_aux_subscribed() && state.requested_adc_rate_hz > poll_rate_hz)
-                poll_rate_hz = state.requested_adc_rate_hz;
-#endif
-        }
-
-        TickType_t period =
-            pdMS_TO_TICKS(1000U / poll_rate_hz);
-
-        if (period == 0) {
-            period = 1;
-        }
-#if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY
-        if (streaming && imu_due && gatt_dmp_subscribed()) {
-            imu_dmp_sample_t sample;
-            if (imu_manager_latest_dmp(&sample)) {
-                bool is_new = sample.sequence != last_imu_sequence;
-#if CONFIG_IMU_NOTIFY_DUPLICATE_SAMPLES
-                is_new = true;
-#endif
-                if (is_new) {
-                    uint8_t packet[IMU_PACKET_Q30_SIZE];
-                    size_t length = ble_encode_imu_for_mtu(
-                        packet, sizeof(packet), state.mtu, &sample);
-                    if (length == 0 || enqueue_notification(gatt_dmp_handle, packet, length) != 0) {
-                        SYSTEM_STATE_INCREMENT(dropped_notifications);
-                    } else {
-                        ++sent_in_window;
-                    }
-                    /* Consume samples once, including recoverable enqueue failures. */
-                    last_imu_sequence = sample.sequence;
-                }
-            }
-        }
-#endif
-#if CONFIG_IMU_RAW_ENABLED || CONFIG_IMU_RAW_DUMMY
-        if (streaming && imu_due &&
-            gatt_imu_raw_subscribed()) {
-
-            imu_raw_sample_t raw_sample;
-
-            if (imu_manager_latest_raw(&raw_sample) &&
-                raw_sample.sequence != last_raw_sequence) {
-                uint8_t packet[IMU_RAW_FULL_V1_SIZE];
-
-                size_t length = ble_encode_imu_raw_for_mtu(
-                    packet,
-                    sizeof(packet),
-                    state.mtu,
-                    &raw_sample);
-
-                if (length == 0) {
-                    SYSTEM_STATE_INCREMENT(dropped_notifications);
-
-                    last_raw_sequence = raw_sample.sequence;
-                } else {
-                    int rc = enqueue_notification(
-                        gatt_imu_raw_handle,
-                        packet,
-                        (uint16_t)length);
-
-                    if (rc != 0) {
-                        SYSTEM_STATE_INCREMENT(dropped_notifications);
-                        static unsigned raw_notify_failures;
-                        if (++raw_notify_failures <= 5 || raw_notify_failures % 100 == 0) {
-                            ESP_LOGW(TAG, "raw notification enqueue failure rc=%d count=%u",
-                                     rc, raw_notify_failures);
-                        }
-                    } else {
-                        sent_in_window++;
-                    }
-
-                    /*
-                     * Consume each raw sample once. Notification errors are
-                     * recoverable and do not terminate the connection.
-                     */
-                    last_raw_sequence = raw_sample.sequence;
-                }
-            }
-        }
-#endif
-#if CONFIG_AUX_ADC_ENABLED
-        if (streaming &&
-            gatt_aux_subscribed()) {
-            adc_sample_t adc_sample;
-            if ( adc_manager_latest(&adc_sample) && adc_sample.sequence != last_adc_sequence) {
-                uint8_t packet[AUX_PACKET_V1_SIZE];
-                size_t length = ble_encode_aux_for_mtu(
-                    packet,
-                    sizeof(packet),
-                    state.mtu,
-                    &adc_sample);
-
-                if (length == 0) {
-                    SYSTEM_STATE_INCREMENT(dropped_notifications);
-
-                    last_adc_sequence = adc_sample.sequence;
-                } else {
-                    int rc = enqueue_notification(
-                        gatt_aux_handle,
-                        packet,
-                        (uint16_t)length);
-
-                    if (rc != 0) {
-                        SYSTEM_STATE_INCREMENT(dropped_notifications);
-                        static unsigned aux_notify_failures;
-                        if (++aux_notify_failures <= 5 || aux_notify_failures % 100 == 0)
-                            ESP_LOGW(TAG, "AUX notification enqueue failure rc=%d count=%u",
-                                     rc, aux_notify_failures);
-                    }
-                    /*
-                     * Consume each AUX sample once. Notification errors are
-                     * recoverable and do not terminate the connection.
-                     */
-                    last_adc_sequence = adc_sample.sequence;
-                }
-            }
-        }
-#endif
-
-        now_us = esp_timer_get_time();
-
-        if (now_us - rate_window_us >= 1000000ULL) {
-            SYSTEM_STATE_SET(actual_imu_notify_rate_hz,
-                             sent_in_window * 1000000ULL / (now_us - rate_window_us));
-
             sent_in_window = 0;
             rate_window_us = now_us;
         }
-
-        system_state_snapshot(&state);
-
-        if (now_us >= status_due_us) {
-            status_due_us =
-                now_us + state.status_period_ms * 1000ULL;
-
-            if (state.ble_connected &&
-                gatt_status_subscribed()) {
-                uint8_t packet[STATUS_PACKET_FULL_SIZE];
-
-                size_t length = ble_encode_status_for_mtu(
-                    packet,
-                    sizeof(packet),
-                    state.mtu);
-
-                if (length != 0) {
-                    int rc = enqueue_notification(
-                        gatt_status_handle,
-                        packet,
-                        (uint16_t)length);
-
-                    if (rc != 0) {
-                        SYSTEM_STATE_INCREMENT(dropped_notifications);
-                    }
-                }
-            }
-
-            if (state.ble_connected &&
-                gatt_battery_subscribed() &&
-                state.battery_percent != last_battery) {
-                int rc = enqueue_notification(
-                    gatt_battery_handle,
-                    &state.battery_percent,
-                    sizeof(state.battery_percent));
-
-                if (rc == 0) {
-                    last_battery = state.battery_percent;
-                } else {
-                    SYSTEM_STATE_INCREMENT(dropped_notifications);
-                }
+        for (unsigned kind = 1; kind <= STREAM_COUNT; ++kind) {
+            pending_frame_t *frame = &s_pending[kind - 1];
+            if (!frame->length) continue;
+            if (!streaming || !gatt_stream_subscribed(kind) ||
+                frame->epoch != gatt_stream_epoch(kind)) {
+                frame->length = 0;
+            } else if (s_tx_pending && s_tx_job.kind == kind) {
+                /* The host can complete after the loop's initial result check.
+                 * Consume that result before expiring/reframing its batch, so
+                 * an accepted final enqueue is neither duplicated nor dropped. */
+                continue;
+            } else if (now_us - frame->created_us >= BATCH_RETRY_MS * 1000LL) {
+                count_stream_loss(kind, frame->generation, frame->epoch, frame->samples);
+                frame->length = 0;
+            } else if (frame->mtu != state.mtu) {
+                /* A new fragment0 invalidates any partial old-MTU assembly. */
+                frame->mtu = state.mtu;
+                frame->frame_id = ++s_frame_ids[kind - 1];
+                frame->fragment = 0;
             }
         }
-
-        vTaskDelayUntil(&wake, period);
+        if (now_us >= status_due_us) {
+            uint32_t period_ms = state.status_period_ms < 250 ? 250 : state.status_period_ms;
+            status_due_us = now_us + period_ms * 1000LL;
+            pending_frame_t *status = &s_pending[STREAM_STATUS - 1];
+            if (streaming && gatt_status_subscribed() && !status->length) {
+                size_t length = ble_batch_encode_status(status->data, sizeof(status->data), &state);
+                if (length) {
+                    initialize_pending(status, STREAM_STATUS, state.mtu, generation,
+                                       gatt_stream_epoch(STREAM_STATUS), now_us);
+                    status->length = length;
+                    status->samples = 0;
+                }
+            }
+            pending_frame_t *battery = &s_pending[STREAM_BATTERY - 1];
+            if (streaming && gatt_battery_subscribed() && !battery->length &&
+                state.battery_percent != last_battery) {
+                initialize_pending(battery, STREAM_BATTERY, state.mtu, generation,
+                                   gatt_stream_epoch(STREAM_BATTERY), now_us);
+                battery->data[0] = state.battery_percent;
+                battery->length = 1;
+                battery->samples = 0;
+            }
+        }
+        /* Bound work and rotate streams so AUX/status cannot starve raw/DMP.
+         * An outstanding host job is immutable even if its frame expires. */
+        for (unsigned budget = 0; streaming && budget < TX_BUDGET; ++budget) {
+            finish_host_job(&sent_in_window, &last_battery);
+            if (s_tx_pending) break;
+            pending_frame_t *selected = NULL;
+            for (unsigned checked = 0; checked < STREAM_COUNT; ++checked) {
+                unsigned kind = cursor + 1;
+                cursor = (cursor + 1) % STREAM_COUNT;
+                if (!gatt_stream_subscribed(kind)) continue;
+                pending_frame_t *frame = &s_pending[kind - 1];
+                if (!frame->length && kind <= BLE_BUFFER_AUX)
+                    prepare_sensor_frame(frame, kind, &state, generation, esp_timer_get_time());
+                if (frame->length) { selected = frame; break; }
+            }
+            if (!selected || !post_host_job(selected)) break;
+            TickType_t wait = pdMS_TO_TICKS(10);
+            xSemaphoreTake(s_tx_ack, wait ? wait : 1);
+            finish_host_job(&sent_in_window, &last_battery);
+        }
+        now_us = esp_timer_get_time();
+        if (now_us - rate_window_us >= 1000000LL) {
+            SYSTEM_STATE_SET(actual_imu_notify_rate_hz,
+                sent_in_window * 1000000ULL / (now_us - rate_window_us));
+            sent_in_window = 0;
+            rate_window_us = now_us;
+        }
+        TickType_t period = pdMS_TO_TICKS(streaming ? 5 : 50);
+        vTaskDelay(period ? period : 1);
     }
 }
 
@@ -716,6 +779,9 @@ esp_err_t ble_manager_init(void)
 
     esp_err_t err = nimble_port_init();
     if (err != ESP_OK) return err;
+    s_tx_ack = xSemaphoreCreateBinary();
+    if (!s_tx_ack) return ESP_ERR_NO_MEM;
+    ble_npl_event_init(&s_tx_event, notification_host_event, NULL);
 
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
@@ -794,4 +860,8 @@ void ble_manager_start_pairing(void)
 void ble_manager_stop_notifications(void)
 {
     atomic_store(&s_notifications_enabled, false);
+    /* Startup may abort before the BLE mutex has been created. */
+    if (s_connection_lock) xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+    ble_sample_buffer_disable_all();
+    if (s_connection_lock) xSemaphoreGive(s_connection_lock);
 }

@@ -38,7 +38,46 @@ Run `python tests/check_aux_kconfig.py` with the ESP-IDF Python environment to
 check C3/S3 channel limits and GPIO visibility, including old configurations,
 dummy ADC, and disabled AUX.
 
-# Hardware configuration and protocol
+## Protocol v3 and firmware 1.4.1 checks
+
+Current sensor/status frames use fixed-slot batches; the layouts below labeled
+V1/V2 document legacy formats only. See [v3 specification](../docs/BATCH_PROTOCOL_V3.md).
+Run these additional suites with a C compiler supporting ASan/UBSan:
+
+```sh
+python3 tests/native/run_batch_packets.py
+python3 tests/native/run_sample_buffer.py
+python3 tests/native/run_sender.py
+python3 tests/native/run_imu_i2c_transport.py
+```
+
+They exercise the production codec, bounded queues and sender functions with
+host SDK/scheduler shims. `run_batch_packets.py` regenerates deterministic
+`tests/fixtures/batch_v3.json`; copy it into the app's `test/fixtures/` and run
+`flutter test --no-pub test/batch_cross_language_test.dart` there to verify C/Dart
+wire compatibility. Native races model transient failures, connection/CCC
+changes, MTU changes, deadline/completion interleavings and small-MTU fairness.
+The I²C transport tests use the ESP-IDF managed ICM20948 dependency and inject
+read timeouts and failed bank-select writes.
+
+A manual live harness for the recorded 1.4.0 run requires Python with
+`bleak` and platform Bluetooth permission. Close other BLE clients, use
+firmware 1.4.0 **raw mode** with three AUX dummy channels at 100 Hz, and put
+the board nearby. The harness subscribes to raw, AUX and status, requests
+45/90/200/45 Hz with a 250 ms status period, and checks reserved zeros,
+sequences, loss counters, subscription changes and reconnects. After the test
+it requests 45 Hz with a 1,000 ms status period. Firmware restores its
+configured rate after disconnect. Pass the exact advertising name.
+
+```sh
+python3 tests/hardware/check_batch_v3.py --name XIAO-IMU-RAW-75F2 --output batch_v3_live_result.json
+```
+
+This checks delivery and format, not calibrated sensor accuracy or all radio
+conditions. It cannot substitute for Flutter UI and Windows/other platform
+hardware tests. [Recorded release scope](../docs/VALIDATION_V3.md).
+
+# Legacy hardware configuration and protocol
 
 - AUX V1 is **22 bytes**: version u8, sequence low u8, timestamp_ms u32 LE,
   then eight signed 16-bit LE values. Notifications require ATT MTU >=25;

@@ -8,6 +8,7 @@
 #include "board/board_pins.h"
 #include "board/board_config.h"
 #include "system_state.h"
+#include "ble/ble_sample_buffer.h"
 
 static const char *TAG = "adc";
 static SemaphoreHandle_t s_sample_lock;
@@ -55,54 +56,74 @@ static adc_atten_t configured_attenuation(void)
 }
 #endif
 
+static bool acquire_adc_sample(int64_t now_us)
+{
+    uint32_t epoch = ble_sample_buffer_epoch(BLE_BUFFER_AUX);
+    /* Aggregate initialization keeps every unused packet channel at zero. */
+    adc_sample_t sample = {.timestamp_ms = (uint32_t)(now_us / 1000)};
+#if CONFIG_AUX_ADC_ENABLED && !CONFIG_ADC_DUMMY
+    for (unsigned channel = 0; channel < APP_AUX_ADC_CHANNEL_COUNT; ++channel) {
+        int raw_sum = 0;
+        for (unsigned n = 0; n < CONFIG_ADC_AVERAGE_SAMPLES; ++n) {
+            int raw_count;
+            esp_err_t err = adc_oneshot_read(s_adc_units[channel],
+                                            s_adc_channels[channel], &raw_count);
+            if (err != ESP_OK) {
+                system_state_set_error("aux_adc", err);
+                return false;
+            }
+            raw_sum += raw_count;
+        }
+        sample.values[channel] = raw_sum / CONFIG_ADC_AVERAGE_SAMPLES;
+    }
+#elif CONFIG_AUX_ADC_ENABLED
+    for (unsigned channel = 0; channel < APP_AUX_ADC_CHANNEL_COUNT; ++channel)
+        sample.values[channel] = (channel + 1) * 0x100;
+#endif
+    sample.sequence = ++s_sample_sequence;
+    xSemaphoreTake(s_sample_lock, portMAX_DELAY);
+    s_latest_sample = sample;
+    s_has_sample = true;
+    xSemaphoreGive(s_sample_lock);
+    ble_sample_buffer_publish_aux(&sample, epoch);
+    SYSTEM_STATE_INCREMENT(adc_sample_count);
+    return true;
+}
+
 static void adc_sampling_task(void *arg)
 {
     (void)arg;
     TickType_t last_wake_tick = xTaskGetTickCount();
     int64_t rate_window_start_us = esp_timer_get_time();
+    int64_t next_sample_us = rate_window_start_us;
+    uint32_t last_rate_hz = 0;
     uint32_t samples_in_window = 0;
     while (true) {
         system_state_t state;
         system_state_snapshot(&state);
         uint32_t sample_rate_hz = state.requested_adc_rate_hz ?
             state.requested_adc_rate_hz : 1;
-        TickType_t sample_period_ticks = pdMS_TO_TICKS(1000 / sample_rate_hz);
+        /* Check the deadline at least twice per sample where ticks permit.
+         * At the tick ceiling, sample every wake to avoid losing a sample
+         * when the tick and microsecond clocks differ slightly. */
+        uint32_t poll_ms = 500 / sample_rate_hz;
+        if (poll_ms > 50) poll_ms = 50;
+        TickType_t sample_period_ticks = pdMS_TO_TICKS(poll_ms);
         if (!sample_period_ticks) sample_period_ticks = 1;
-        /* Aggregate initialization keeps every unused packet channel at zero. */
-        adc_sample_t sample = {
-            .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
-        };
-        bool sample_valid = true;
-#if CONFIG_AUX_ADC_ENABLED && !CONFIG_ADC_DUMMY
-        for (unsigned channel = 0; channel < APP_AUX_ADC_CHANNEL_COUNT && sample_valid; ++channel) {
-            int raw_sum = 0;
-            for (unsigned n = 0; n < CONFIG_ADC_AVERAGE_SAMPLES; ++n) {
-                int raw_count;
-                esp_err_t err = adc_oneshot_read(s_adc_units[channel],
-                                                s_adc_channels[channel], &raw_count);
-                if (err != ESP_OK) {
-                    system_state_set_error("aux_adc", err);
-                    sample_valid = false;
-                    break;
-                }
-                raw_sum += raw_count;
-            }
-            sample.values[channel] = raw_sum / CONFIG_ADC_AVERAGE_SAMPLES;
-        }
-#elif CONFIG_AUX_ADC_ENABLED
-        for (unsigned channel = 0; channel < APP_AUX_ADC_CHANNEL_COUNT; ++channel)
-            sample.values[channel] = (channel + 1) * 0x100;
-#endif
-        if (sample_valid) {
-            sample.sequence = ++s_sample_sequence;
-            xSemaphoreTake(s_sample_lock, portMAX_DELAY);
-            s_latest_sample = sample;
-            s_has_sample = true;
-            xSemaphoreGive(s_sample_lock);
-            SYSTEM_STATE_INCREMENT(adc_sample_count);
-            ++samples_in_window;
-        }
         int64_t now_us = esp_timer_get_time();
+        if (sample_rate_hz != last_rate_hz) {
+            next_sample_us = now_us;
+            last_rate_hz = sample_rate_hz;
+        }
+        const bool tick_limited = sample_rate_hz >= configTICK_RATE_HZ;
+        if (tick_limited || now_us >= next_sample_us) {
+            if (!tick_limited) {
+                const int64_t interval_us = 1000000LL / sample_rate_hz;
+                next_sample_us += ((now_us - next_sample_us) / interval_us + 1) * interval_us;
+            }
+            if (acquire_adc_sample(now_us)) ++samples_in_window;
+        }
+        now_us = esp_timer_get_time();
         if (now_us - rate_window_start_us >= 1000000) {
             SYSTEM_STATE_SET(actual_adc_sample_rate_hz,
                              samples_in_window * 1000000ULL /

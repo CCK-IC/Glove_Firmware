@@ -52,6 +52,7 @@ typedef struct {
     uint32_t dmp_sample_count;
     uint32_t dropped_dmp_samples;
     uint32_t dropped_notifications;
+    uint32_t dropped_sensor_samples;
     uint32_t fifo_overflows;
     uint32_t i2c_errors;
     uint32_t imu_reinitializations;

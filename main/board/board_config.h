@@ -9,6 +9,7 @@ esp_err_t board_config_validate(void);
 esp_err_t board_config_init(void);
 const char *board_name(void);
 i2c_master_bus_handle_t board_i2c_bus(void);
+void board_i2c_line_levels(int *scl, int *sda);
 bool board_button_pressed(void);
 /* Initialization is serialized by app_main; all users share one handle per unit. */
 esp_err_t board_adc_get_unit(adc_unit_t unit, adc_oneshot_unit_handle_t *out);

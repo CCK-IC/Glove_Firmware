@@ -26,6 +26,7 @@ typedef int esp_err_t;
     "freertos/FreeRTOS.h": """#pragma once
 #include <stdint.h>
 typedef uint32_t TickType_t;
+#define configTICK_RATE_HZ 1000
 #define portMAX_DELAY UINT32_MAX
 #define pdPASS 1
 #define pdMS_TO_TICKS(ms) ((TickType_t)(ms))
@@ -132,7 +133,7 @@ with tempfile.TemporaryDirectory(prefix="glove-regression-") as temp:
         path.write_text(contents)
     packet_sources = [root / "main/system_state.c", root / "main/ble/ble_packets.c",
                       Path(__file__).with_name("regression.c")]
-    adc_sources = [root / "main/system_state.c", root / "main/adc/adc_manager.c",
+    adc_sources = [root / "main/system_state.c", root / "main/adc/adc_manager.c", root / "main/ble/ble_sample_buffer.c",
                    Path(__file__).with_name("adc_regression.c")]
     for target, count in [("c3", 3), ("c3", 1), ("s3", 8), ("c3", 0)]:
         name = f"{target}_{count}"

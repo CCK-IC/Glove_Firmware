@@ -21,3 +21,6 @@ bool gatt_imu_raw_subscribed(void);
 bool gatt_aux_subscribed(void);
 bool gatt_status_subscribed(void);
 bool gatt_battery_subscribed(void);
+
+uint32_t gatt_stream_epoch(unsigned kind);
+bool gatt_stream_subscribed(unsigned kind);

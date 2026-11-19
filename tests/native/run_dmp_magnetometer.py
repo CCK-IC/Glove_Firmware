@@ -37,6 +37,8 @@ typedef int esp_err_t;
 #define ESP_ERR_NOT_FOUND 2
 #define ESP_ERR_INVALID_STATE 3
 #define ESP_ERR_NOT_SUPPORTED 4
+#define ESP_ERR_TIMEOUT 5
+#define ESP_ERR_INVALID_RESPONSE 6
 const char *esp_err_to_name(esp_err_t error);
 ''',
     'esp_log.h': '''#pragma once
@@ -82,6 +84,8 @@ typedef struct { int dev_addr_length; uint16_t device_address; uint32_t scl_spee
 #define I2C_ADDR_BIT_LEN_7 0
 esp_err_t i2c_master_bus_add_device(i2c_master_bus_handle_t bus, const i2c_device_config_t *config, i2c_master_dev_handle_t *device);
 esp_err_t i2c_master_bus_rm_device(i2c_master_dev_handle_t device);
+esp_err_t i2c_master_probe(i2c_master_bus_handle_t bus, uint16_t address, int timeout_ms);
+esp_err_t i2c_master_bus_reset(i2c_master_bus_handle_t bus);
 ''',
     'esp_adc/adc_oneshot.h': '#pragma once\ntypedef int adc_unit_t;\ntypedef void *adc_oneshot_unit_handle_t;\n',
 }
