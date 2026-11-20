@@ -1,5 +1,15 @@
 # Firmware handoff
 
+## Publication branches, 2026-11-20
+
+- Firmware 1.4.1 remains on `codex/v1.4.1` (release commit `67b2436`).
+  Companion app 1.1.0+2 uses `codex/stable-v3-fw-v1.4.1` for its Stable V3
+  release (app commit `dfeddf6`), including v3 batch ingestion and independent
+  ADC rate control.
+- The subsequent [firmware refactor review](REFACTOR_REVIEW.md) records measured
+  build comparisons and future recommendations. It does not apply those
+  optimizations or establish new radio throughput results.
+
 ## I²C recovery and ADC rate — firmware 1.4.1, 2026-11-19
 
 - The first IMU initialization uses the 1.4.0 sequence and configured clock.
