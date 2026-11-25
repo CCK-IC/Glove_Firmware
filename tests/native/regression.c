@@ -2,13 +2,11 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
-#include "ble/ble_packets.h"
+#include "legacy_ble_packets.h"
 #include "system_state.h"
 
 static int64_t s_now_us = 1000000;
 int64_t esp_timer_get_time(void) { return s_now_us; }
-uint32_t esp_get_free_heap_size(void) { return 1024; }
-uint32_t esp_get_minimum_free_heap_size(void) { return 512; }
 
 static void *samples(void *unused)
 {
@@ -88,7 +86,7 @@ int main(void)
         assert(guarded.before[i] == 0xA5);
         assert(guarded.after[i] == 0xA5);
     }
-    /* GATT reads use the direct encoder: it must mask the same dirty slots. */
+    /* The legacy direct encoder must mask the same dirty slots. */
     memset(guarded.packet, 0xA5, sizeof(guarded.packet));
     ble_encode_aux(guarded.packet, sample.timestamp_ms, sample.sequence, sample.values);
     assert(memcmp(guarded.packet, expected, sizeof(expected)) == 0);

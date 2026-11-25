@@ -4,7 +4,6 @@ idf_component_register(
         "app_events.c"
         "system_state.c"
         "board/board_config.c"
-        "ble/ble_packets.c"
         "ble/ble_batch_packets.c"
         "ble/ble_sample_buffer.c"
         "ble/gatt_server.c"

@@ -4,8 +4,15 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "sdkconfig.h"
 #include "system_state.h"
 
+typedef struct {
+    uint32_t sequence;
+    uint32_t timestamp_ms;
+} sample_prefix_t;
+
+_Static_assert(sizeof(sample_prefix_t) == 8 && offsetof(sample_prefix_t, timestamp_ms) == 4, "sample prefix layout");
 _Static_assert(offsetof(imu_raw_sample_t, sequence) == 0 && offsetof(imu_raw_sample_t, timestamp_ms) == 4, "raw prefix");
 _Static_assert(offsetof(imu_dmp_sample_t, sequence) == 0 && offsetof(imu_dmp_sample_t, timestamp_ms) == 4, "DMP prefix");
 _Static_assert(offsetof(adc_sample_t, sequence) == 0 && offsetof(adc_sample_t, timestamp_ms) == 4, "AUX prefix");
@@ -22,12 +29,16 @@ typedef struct {
 } sample_ring_t;
 
 static imu_raw_sample_t s_raw[BLE_SAMPLE_QUEUE_DEPTH];
+#if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY
 static imu_dmp_sample_t s_dmp[BLE_SAMPLE_QUEUE_DEPTH];
+#endif
 static adc_sample_t s_aux[BLE_SAMPLE_QUEUE_DEPTH];
-static sample_ring_t s_rings[3] = {
-    {.storage = (uint8_t *)s_raw, .item_size = sizeof(s_raw[0])},
-    {.storage = (uint8_t *)s_dmp, .item_size = sizeof(s_dmp[0])},
-    {.storage = (uint8_t *)s_aux, .item_size = sizeof(s_aux[0])},
+static sample_ring_t s_rings[BLE_BUFFER_AUX] = {
+    [BLE_BUFFER_RAW - 1] = {.storage = (uint8_t *)s_raw, .item_size = sizeof(s_raw[0])},
+#if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY
+    [BLE_BUFFER_DMP - 1] = {.storage = (uint8_t *)s_dmp, .item_size = sizeof(s_dmp[0])},
+#endif
+    [BLE_BUFFER_AUX - 1] = {.storage = (uint8_t *)s_aux, .item_size = sizeof(s_aux[0])},
 };
 
 static sample_ring_t *ring_for(unsigned kind)
@@ -38,8 +49,8 @@ static sample_ring_t *ring_for(unsigned kind)
 esp_err_t ble_sample_buffer_init(void)
 {
     /* Application initialization is serialized, before acquisition starts. */
-    for (unsigned i = 0; i < 3; ++i) {
-        if (s_rings[i].lock) continue;
+    for (unsigned i = 0; i < BLE_BUFFER_AUX; ++i) {
+        if (!s_rings[i].storage || s_rings[i].lock) continue;
         s_rings[i].lock = xSemaphoreCreateMutex();
         if (!s_rings[i].lock) return ESP_ERR_NO_MEM;
     }
@@ -100,7 +111,12 @@ ble_sample_buffer_info_t ble_sample_buffer_info(unsigned kind)
 
 uint32_t ble_sample_buffer_epoch(unsigned kind)
 {
-    return ble_sample_buffer_info(kind).epoch;
+    sample_ring_t *ring = ring_for(kind);
+    if (!ring || !ring->lock) return 0;
+    xSemaphoreTake(ring->lock, portMAX_DELAY);
+    uint32_t epoch = ring->epoch;
+    xSemaphoreGive(ring->lock);
+    return epoch;
 }
 
 void ble_sample_buffer_note_dropped(size_t count)
@@ -135,50 +151,49 @@ void ble_sample_buffer_publish_dmp(const imu_dmp_sample_t *sample, uint32_t epoc
 void ble_sample_buffer_publish_aux(const adc_sample_t *sample, uint32_t epoch)
 { publish(BLE_BUFFER_AUX, sample, epoch); }
 
-static bool compatible(unsigned kind, const void *first, const void *next,
-                       uint32_t previous_sequence_delta, uint32_t previous_time_delta)
-{
-    uint32_t first_sequence, next_sequence, first_time, next_time;
-    memcpy(&first_sequence, first, sizeof(uint32_t));
-    memcpy(&next_sequence, next, sizeof(uint32_t));
-    memcpy(&first_time, (const uint8_t *)first + 4, sizeof(uint32_t));
-    memcpy(&next_time, (const uint8_t *)next + 4, sizeof(uint32_t));
-    uint32_t sequence_delta = next_sequence - first_sequence;
-    uint32_t time_delta = next_time - first_time;
-    if (sequence_delta <= previous_sequence_delta || sequence_delta > UINT8_MAX ||
-        time_delta < previous_time_delta || time_delta > UINT16_MAX) return false;
-    if (kind == BLE_BUFFER_RAW) {
-        const imu_raw_sample_t *a = first, *b = next;
-        if (a->accel_range_code != b->accel_range_code ||
-            a->gyro_range_code != b->gyro_range_code ||
-            a->actual_rate_hz != b->actual_rate_hz) return false;
-    }
-    return true;
-}
-
 static size_t take(unsigned kind, void *out, size_t limit, uint32_t *epoch)
 {
     sample_ring_t *ring = ring_for(kind);
     if (!ring || !ring->lock || !out || !limit || !epoch) return 0;
     xSemaphoreTake(ring->lock, portMAX_DELAY);
     *epoch = ring->epoch;
-    size_t count = 0;
-    uint32_t previous_sequence_delta = 0, previous_time_delta = 0;
-    while (ring->enabled && count < limit && ring->count) {
-        const void *next = ring->storage + ring->head * ring->item_size;
-        if (count && !compatible(kind, out, next, previous_sequence_delta, previous_time_delta)) break;
-        uint32_t sequence, first_sequence, timestamp, first_time;
-        memcpy(&sequence, next, 4);
-        memcpy(&timestamp, (const uint8_t *)next + 4, 4);
-        memcpy((uint8_t *)out + count * ring->item_size, next, ring->item_size);
-        memcpy(&first_sequence, out, 4);
-        memcpy(&first_time, (const uint8_t *)out + 4, 4);
-        previous_sequence_delta = sequence - first_sequence;
-        previous_time_delta = timestamp - first_time;
-        ring->head = (ring->head + 1) % BLE_SAMPLE_QUEUE_DEPTH;
-        --ring->count;
-        ++count;
+    if (!ring->enabled || !ring->count) {
+        xSemaphoreGive(ring->lock);
+        return 0;
     }
+
+    size_t head = ring->head;
+    const uint8_t *first = ring->storage + head * ring->item_size;
+    sample_prefix_t first_prefix;
+    memcpy(&first_prefix, first, sizeof(first_prefix));
+    memcpy(out, first, ring->item_size);
+    head = (head + 1) % BLE_SAMPLE_QUEUE_DEPTH;
+
+    if (limit > ring->count) limit = ring->count;
+    size_t count = 1;
+    uint32_t previous_sequence_delta = 0, previous_time_delta = 0;
+    for (; count < limit; ++count) {
+        const uint8_t *next = ring->storage + head * ring->item_size;
+        sample_prefix_t next_prefix;
+        memcpy(&next_prefix, next, sizeof(next_prefix));
+        uint32_t sequence_delta = next_prefix.sequence - first_prefix.sequence;
+        uint32_t time_delta = next_prefix.timestamp_ms - first_prefix.timestamp_ms;
+        if (sequence_delta <= previous_sequence_delta || sequence_delta > UINT8_MAX ||
+            time_delta < previous_time_delta || time_delta > UINT16_MAX) break;
+        if (kind == BLE_BUFFER_RAW) {
+            const imu_raw_sample_t *first_raw = (const imu_raw_sample_t *)first;
+            const imu_raw_sample_t *next_raw = (const imu_raw_sample_t *)next;
+            if (first_raw->accel_range_code != next_raw->accel_range_code ||
+                first_raw->gyro_range_code != next_raw->gyro_range_code ||
+                first_raw->actual_rate_hz != next_raw->actual_rate_hz) break;
+        }
+        memcpy((uint8_t *)out + count * ring->item_size, next, ring->item_size);
+        previous_sequence_delta = sequence_delta;
+        previous_time_delta = time_delta;
+        head = (head + 1) % BLE_SAMPLE_QUEUE_DEPTH;
+    }
+    ring->head = head;
+    ring->count -= count;
     xSemaphoreGive(ring->lock);
     return count;
 }

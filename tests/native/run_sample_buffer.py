@@ -21,6 +21,8 @@ typedef int esp_err_t;
     "sdkconfig.h": """#pragma once
 #define CONFIG_AUX_ADC_ENABLED 1
 #define CONFIG_AUX_ADC_CHANNEL_COUNT 8
+#define CONFIG_IMU_DMP_DUMMY 1
+#define CONFIG_IMU_RAW_DUMMY 1
 """,
     "freertos/FreeRTOS.h": """#pragma once
 #include <stdint.h>

@@ -16,7 +16,7 @@ HEADERS = {
     "esp_err.h": "#pragma once\ntypedef int esp_err_t;\n#define ESP_OK 0\n#define ESP_ERR_NO_MEM 1\n",
     "esp_timer.h": "#pragma once\n#include <stdint.h>\nint64_t esp_timer_get_time(void);\n",
     "esp_system.h": "#pragma once\n#include <stdint.h>\nuint32_t esp_get_free_heap_size(void);\n",
-    "sdkconfig.h": "#pragma once\n#define CONFIG_AUX_ADC_ENABLED 1\n#define CONFIG_AUX_ADC_CHANNEL_COUNT 8\n#define CONFIG_IMU_RAW_ENABLED 1\n",
+    "sdkconfig.h": "#pragma once\n#define CONFIG_AUX_ADC_ENABLED 1\n#define CONFIG_AUX_ADC_CHANNEL_COUNT 8\n#define CONFIG_IMU_RAW_ENABLED 1\n#define CONFIG_IMU_DMP_DUMMY 1\n",
     "freertos/FreeRTOS.h": """#pragma once
 #include <stdint.h>
 typedef int BaseType_t;
@@ -44,7 +44,7 @@ def main():
     sender = (
         between(manager, "enum { BATCH_FLUSH_MS", "static const char *hci_reason_name")
         + between(manager, "static bool stream_is_current(", "static void check_pairing_timeout(")
-        + between(manager, "static uint16_t stream_handle(", "esp_err_t ble_manager_init(")
+        + between(manager, "static void initialize_pending(", "esp_err_t ble_manager_init(")
     )
     with tempfile.TemporaryDirectory(prefix="glove-sender-") as temp:
         directory = Path(temp)

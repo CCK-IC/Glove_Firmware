@@ -27,14 +27,19 @@ static imu_i2c_transport_t s_i2c;
 enum {
     IMU_STREAM_TIMEOUT_MS = 20,
     IMU_STARTUP_RETRY_MS = 1000,
+    IMU_STARTUP_OFFLINE_RETRY_MS = 10000,
     IMU_STARTUP_RETRY_COUNT = 3,
-    IMU_STARTUP_RETRY_CLOCK_HZ = 100000,
+    IMU_RECOVERY_CLOCK_HZ = 100000,
     IMU_RECOVERY_FIRST_MS = 50,
     IMU_RECOVERY_MAX_MS = 5000,
+    IMU_RECOVERY_SAMPLE_TIMEOUT_MS = 2000,
 };
 static unsigned s_raw_read_failures;
 static unsigned s_dmp_reset_failures;
 static int64_t s_recovery_due_us;
+/* Only the acquisition task writes this deadline. Other tasks read it under
+ * s_device_lock when reporting a transport failure. */
+static int64_t s_recovery_sample_deadline_us;
 static unsigned s_recovery_delay_ms;
 static unsigned s_startup_retries_left;
 static uint32_t s_i2c_clock_hz = CONFIG_BOARD_I2C_FREQUENCY_HZ;
@@ -117,7 +122,6 @@ static void generate_dmp_sample(imu_dmp_sample_t *sample)
 #if CONFIG_IMU_ENABLED
 static esp_err_t configure_sensor(bool cold_start, bool reset_sensor)
 {
-    (void)cold_start;
     memset(&s_magnetometer, 0, sizeof(s_magnetometer));
     const i2c_device_config_t device_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
@@ -182,12 +186,12 @@ static esp_err_t configure_sensor(bool cold_start, bool reset_sensor)
     IMU_INIT_CHECK(icm20948_enable_dlpf(&s_sensor, ICM_20948_INTERNAL_GYR, false), ESP_FAIL);
 #if CONFIG_IMU_DMP_ENABLED
     /* Leave the AK09916 powered down for the DMP's single-shot controller. */
-    IMU_INIT_CHECK(imu_magnetometer_configure(&s_sensor, &s_magnetometer, true),
-                   ESP_ERR_NOT_FOUND);
+    const bool dmp_owns_magnetometer = true;
 #else
-    IMU_INIT_CHECK(imu_magnetometer_configure(&s_sensor, &s_magnetometer, false),
-                   ESP_ERR_NOT_FOUND);
+    const bool dmp_owns_magnetometer = false;
 #endif
+    IMU_INIT_CHECK(imu_magnetometer_configure(&s_sensor, &s_magnetometer, dmp_owns_magnetometer),
+                   ESP_ERR_NOT_FOUND);
 
 #if CONFIG_IMU_DMP_ENABLED
     IMU_INIT_CHECK(icm20948_init_dmp_sensor_with_defaults(&s_sensor), ESP_FAIL);
@@ -236,23 +240,31 @@ static void schedule_startup_retry(esp_err_t error)
     SYSTEM_STATE_SET(imu_dmp, false);
     SYSTEM_STATE_SET(imu_state, IMU_STATE_DEGRADED);
     system_state_set_error("imu", error);
-    if (!s_startup_retries_left) {
-        ESP_LOGE(TAG, "IMU startup retries exhausted: %s", esp_err_to_name(error));
-        return;
+    if (s_startup_retries_left) {
+        s_recovery_due_us = esp_timer_get_time() + IMU_STARTUP_RETRY_MS * 1000LL;
+        ESP_LOGW(TAG, "IMU unavailable before first sample: %s; %u startup retries left",
+                 esp_err_to_name(error), s_startup_retries_left);
+    } else {
+        s_recovery_due_us = esp_timer_get_time() + IMU_STARTUP_OFFLINE_RETRY_MS * 1000LL;
+        ESP_LOGW(TAG, "IMU still offline before first sample: %s; retrying in %u ms",
+                 esp_err_to_name(error), IMU_STARTUP_OFFLINE_RETRY_MS);
     }
-    s_recovery_due_us = esp_timer_get_time() + IMU_STARTUP_RETRY_MS * 1000LL;
-    ESP_LOGW(TAG, "IMU unavailable before first sample: %s; %u startup retries left",
-             esp_err_to_name(error), s_startup_retries_left);
 }
 
-/* Call with the device lock after the first valid hardware sample. */
-static void arm_runtime_recovery(void)
+/* Call with the device lock after acquiring a valid hardware sample. */
+static void confirm_hardware_sample(void)
 {
-    if (s_runtime_recovery_armed) return;
-    s_i2c.device = s_i2c_config.dev_handle;
-    imu_i2c_attach(&s_i2c, &s_sensor);
-    s_runtime_recovery_armed = true;
-    ESP_LOGI(TAG, "IMU streaming; runtime I2C recovery armed");
+    if (!s_runtime_recovery_armed) {
+        s_i2c.device = s_i2c_config.dev_handle;
+        imu_i2c_attach(&s_i2c, &s_sensor);
+        s_runtime_recovery_armed = true;
+        ESP_LOGI(TAG, "IMU streaming; runtime I2C recovery armed");
+    } else if (s_recovery_sample_deadline_us) {
+        s_recovery_sample_deadline_us = 0;
+        SYSTEM_STATE_SET(imu_state, IMU_STATE_RUNNING);
+        ESP_LOGI(TAG, "IMU recovered at %lu Hz I2C; hardware samples resumed",
+                 (unsigned long)s_i2c_clock_hz);
+    }
 }
 
 static void log_i2c_failure(const char *operation, esp_err_t error)
@@ -264,6 +276,16 @@ static void log_i2c_failure(const char *operation, esp_err_t error)
              (unsigned)s_i2c.failed_register, scl, sda);
 }
 
+static void schedule_runtime_retry(esp_err_t error)
+{
+    system_state_set_error("imu", error);
+    s_recovery_delay_ms *= 4;
+    if (s_recovery_delay_ms > IMU_RECOVERY_MAX_MS) s_recovery_delay_ms = IMU_RECOVERY_MAX_MS;
+    s_recovery_due_us = esp_timer_get_time() + s_recovery_delay_ms * 1000LL;
+    ESP_LOGW(TAG, "IMU recovery failed: %s; retrying in %u ms",
+             esp_err_to_name(error), s_recovery_delay_ms);
+}
+
 /* Call under the device lock. */
 static void mark_sensor_unavailable(esp_err_t error)
 {
@@ -271,9 +293,15 @@ static void mark_sensor_unavailable(esp_err_t error)
         schedule_startup_retry(error);
         return;
     }
-    s_recovery_delay_ms = IMU_RECOVERY_FIRST_MS;
-    s_recovery_due_us = esp_timer_get_time() + s_recovery_delay_ms * 1000LL;
-    s_reconfigure_on_retry = false;
+    if (s_recovery_sample_deadline_us) {
+        s_reconfigure_on_retry = true;
+        schedule_runtime_retry(error);
+    } else {
+        s_reconfigure_on_retry = false;
+        s_recovery_delay_ms = IMU_RECOVERY_FIRST_MS;
+        s_recovery_due_us = esp_timer_get_time() + s_recovery_delay_ms * 1000LL;
+        system_state_set_error("imu", error);
+    }
     atomic_store(&s_sensor_ready, false);
     ble_sample_buffer_invalidate(BLE_BUFFER_RAW);
     ble_sample_buffer_invalidate(BLE_BUFFER_DMP);
@@ -292,7 +320,6 @@ static void mark_sensor_unavailable(esp_err_t error)
     SYSTEM_STATE_SET(who_am_i, 0);
     SYSTEM_STATE_SET(imu_dmp, false);
     SYSTEM_STATE_SET(imu_state, IMU_STATE_DEGRADED);
-    system_state_set_error("imu", error);
 }
 
 static esp_err_t reset_i2c_bus(void)
@@ -337,29 +364,44 @@ static esp_err_t verify_runtime_sensor(void)
 
 static void retry_sensor_if_due(void)
 {
-    if (atomic_load(&s_sensor_ready) ||
-        (!s_runtime_recovery_armed && !s_startup_retries_left)) return;
+    if (atomic_load(&s_sensor_ready)) {
+        if (s_recovery_sample_deadline_us &&
+            esp_timer_get_time() >= s_recovery_sample_deadline_us) {
+            xSemaphoreTake(s_device_lock, portMAX_DELAY);
+            if (atomic_load(&s_sensor_ready)) {
+                ESP_LOGW(TAG, "IMU recovery produced no hardware sample");
+                mark_sensor_unavailable(ESP_ERR_TIMEOUT);
+            }
+            xSemaphoreGive(s_device_lock);
+        }
+        return;
+    }
     xSemaphoreTake(s_device_lock, portMAX_DELAY);
-    if (esp_timer_get_time() < s_recovery_due_us) {
+    if (!s_recovery_due_us || esp_timer_get_time() < s_recovery_due_us) {
         xSemaphoreGive(s_device_lock);
         return;
     }
+    s_recovery_sample_deadline_us = 0;
     SYSTEM_STATE_INCREMENT(imu_reinitializations);
-    esp_err_t error;
-    if (!s_runtime_recovery_armed) {
-        --s_startup_retries_left;
-        if (s_i2c_clock_hz > IMU_STARTUP_RETRY_CLOCK_HZ)
-            s_i2c_clock_hz = IMU_STARTUP_RETRY_CLOCK_HZ;
+    const bool runtime_recovery = s_runtime_recovery_armed;
+    if (!runtime_recovery) {
+        if (s_startup_retries_left) --s_startup_retries_left;
+        if (s_i2c_clock_hz > IMU_RECOVERY_CLOCK_HZ)
+            s_i2c_clock_hz = IMU_RECOVERY_CLOCK_HZ;
         ESP_LOGI(TAG, "Retrying IMU startup with stock driver at %lu Hz",
                  (unsigned long)s_i2c_clock_hz);
-        error = reset_i2c_bus();
-        if (error == ESP_OK) error = detach_sensor();
-        if (error == ESP_OK) error = configure_sensor(false, false);
-    } else if ((error = reset_i2c_bus()) == ESP_OK) {
-        if (s_reconfigure_on_retry) {
+    }
+
+    esp_err_t error = reset_i2c_bus();
+    if (error == ESP_OK) {
+        if (!runtime_recovery || s_reconfigure_on_retry) {
             error = detach_sensor();
-            if (error == ESP_OK) error = configure_sensor(false, true);
-            if (error == ESP_OK) {
+            if (error == ESP_OK && runtime_recovery && s_i2c_clock_hz > IMU_RECOVERY_CLOCK_HZ) {
+                s_i2c_clock_hz = IMU_RECOVERY_CLOCK_HZ;
+                ESP_LOGW(TAG, "Retrying IMU at %lu Hz I2C", (unsigned long)s_i2c_clock_hz);
+            }
+            if (error == ESP_OK) error = configure_sensor(false, runtime_recovery);
+            if (error == ESP_OK && runtime_recovery) {
                 s_i2c.device = s_i2c_config.dev_handle;
                 imu_i2c_attach(&s_i2c, &s_sensor);
             }
@@ -373,17 +415,19 @@ static void retry_sensor_if_due(void)
         s_raw_read_failures = 0;
         s_dmp_reset_failures = 0;
         atomic_store(&s_sensor_ready, true);
-        SYSTEM_STATE_SET(imu_state, IMU_STATE_RUNNING);
-        ESP_LOGI(TAG, "IMU configured after retry; starting acquisition");
+        if (runtime_recovery) {
+            s_recovery_sample_deadline_us =
+                esp_timer_get_time() + IMU_RECOVERY_SAMPLE_TIMEOUT_MS * 1000LL;
+            ESP_LOGI(TAG, "IMU responds at %lu Hz I2C; waiting for a hardware sample",
+                     (unsigned long)s_i2c_clock_hz);
+        } else {
+            SYSTEM_STATE_SET(imu_state, IMU_STATE_RUNNING);
+            ESP_LOGI(TAG, "IMU configured after startup retry; starting acquisition");
+        }
     } else if (!s_runtime_recovery_armed) {
         schedule_startup_retry(error);
     } else {
-        system_state_set_error("imu", error);
-        s_recovery_delay_ms *= 4;
-        if (s_recovery_delay_ms > IMU_RECOVERY_MAX_MS) s_recovery_delay_ms = IMU_RECOVERY_MAX_MS;
-        s_recovery_due_us = esp_timer_get_time() + s_recovery_delay_ms * 1000LL;
-        ESP_LOGW(TAG, "IMU recovery failed: %s; retrying in %u ms",
-                 esp_err_to_name(error), s_recovery_delay_ms);
+        schedule_runtime_retry(error);
     }
     xSemaphoreGive(s_device_lock);
 }
@@ -395,7 +439,7 @@ static void record_i2c_failure(const char *operation, unsigned *consecutive_fail
     if (error == ESP_OK) return;
     SYSTEM_STATE_INCREMENT(i2c_errors);
     const bool first_failure = ++*consecutive_failures == 1;
-    const bool needs_recovery = error == ESP_ERR_TIMEOUT ||
+    const bool needs_recovery = s_recovery_sample_deadline_us || error == ESP_ERR_TIMEOUT ||
         *consecutive_failures >= CONFIG_IMU_ERROR_REINIT_COUNT;
     if (first_failure || needs_recovery) log_i2c_failure(operation, error);
     if (needs_recovery) mark_sensor_unavailable(error);
@@ -553,6 +597,10 @@ static bool acquire_raw_sample(uint64_t now_us, const system_state_t *state)
     if (!s_sensor_ready) return false;
     icm20948_agmt_t sensor_data = {0};
     xSemaphoreTake(s_device_lock, portMAX_DELAY);
+    if (!s_sensor_ready) {
+        xSemaphoreGive(s_device_lock);
+        return false;
+    }
     epoch = ble_sample_buffer_epoch(BLE_BUFFER_RAW);
     if (s_runtime_recovery_armed) imu_i2c_begin(&s_i2c, IMU_STREAM_TIMEOUT_MS);
     icm20948_status_e status = icm20948_get_agmt(&s_sensor, &sensor_data);
@@ -570,14 +618,15 @@ static bool acquire_raw_sample(uint64_t now_us, const system_state_t *state)
             record_i2c_failure("Raw IMU acquisition I2C failure", &s_raw_read_failures);
         } else {
             if (++s_raw_read_failures == 1) ESP_LOGW(TAG, "Raw IMU read failed: rc=%d", (int)status);
-            if (s_raw_read_failures >= CONFIG_IMU_ERROR_REINIT_COUNT) mark_sensor_unavailable(ESP_FAIL);
+            if (s_recovery_sample_deadline_us || s_raw_read_failures >= CONFIG_IMU_ERROR_REINIT_COUNT)
+                mark_sensor_unavailable(ESP_FAIL);
         }
         xSemaphoreGive(s_device_lock);
         return false;
     }
     s_raw_read_failures = 0;
     imu_magnetometer_apply(&s_magnetometer, &sample, esp_timer_get_time());
-    arm_runtime_recovery();
+    confirm_hardware_sample();
     xSemaphoreGive(s_device_lock);
     sample.sequence = ++s_raw_sequence;
     sample.accel_x = sensor_data.acc.axes.x;
@@ -641,9 +690,11 @@ static void acquisition_task(void *arg)
 #if CONFIG_IMU_DMP_ENABLED
         if (s_sensor_ready) {
             xSemaphoreTake(s_device_lock, portMAX_DELAY);
-            dmp_epoch = ble_sample_buffer_epoch(BLE_BUFFER_DMP);
-            valid = read_dmp_sample(&sample, &consecutive_errors);
-            if (valid) arm_runtime_recovery();
+            if (s_sensor_ready) {
+                dmp_epoch = ble_sample_buffer_epoch(BLE_BUFFER_DMP);
+                valid = read_dmp_sample(&sample, &consecutive_errors);
+                if (valid) confirm_hardware_sample();
+            }
             xSemaphoreGive(s_device_lock);
         }
 #endif
@@ -690,7 +741,10 @@ static void acquisition_task(void *arg)
 #endif
         const uint64_t elapsed_us = now_us - measurement_start_us;
         if (elapsed_us >= 1000000ULL) {
-            const bool sensor_ready = atomic_load(&s_sensor_ready);
+            bool sensor_ready = atomic_load(&s_sensor_ready);
+#if CONFIG_IMU_ENABLED
+            sensor_ready = sensor_ready && !s_recovery_sample_deadline_us;
+#endif
             uint32_t measured_dmp_rate_hz = dmp_sample_count * 1000000ULL / elapsed_us;
 #if !CONFIG_IMU_DMP_DUMMY && !CONFIG_IMU_SYNTHETIC_FALLBACK
             if (!sensor_ready) measured_dmp_rate_hz = 0;
@@ -711,7 +765,7 @@ static void acquisition_task(void *arg)
             measurement_start_us = now_us;
         }
 #if CONFIG_IMU_ENABLED
-        if ((s_runtime_recovery_armed || s_startup_retries_left) && !atomic_load(&s_sensor_ready)) {
+        if (!atomic_load(&s_sensor_ready)) {
             const TickType_t recovery_poll = pdMS_TO_TICKS(IMU_RECOVERY_FIRST_MS);
             if (recovery_poll && recovery_poll < polling_period) polling_period = recovery_poll;
         }

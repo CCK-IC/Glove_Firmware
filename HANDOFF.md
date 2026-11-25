@@ -1,5 +1,23 @@
 # Firmware handoff
 
+## IMU recovery verification — firmware 1.4.2, 2026-11-25
+
+- Runtime recovery keeps the IMU degraded until acquisition produces a valid
+  hardware sample. A failed transfer or a two-second wait without a sample
+  escalates to full reinitialization at up to 100 kHz with backoff.
+- The initial startup sequence and first three retries retain the stock I²C
+  driver. After those retries, the firmware continues probing every 10 seconds
+  at up to 100 kHz while BLE and ADC remain active.
+- On the XIAO ESP32-C3, USB reset left the IMU offline with intermittent
+  register failures, even during the 100 kHz retries. Fully removing power
+  restored the first IMU sample on cold boot. The native regression covers
+  eventual startup recovery and a runtime I²C failure after successful
+  identity and power checks.
+- A 60-second macOS BLE test at MTU 247 received 4,070 raw IMU samples across
+  requests of 45, 100, 200, and 100 Hz, with valid frame lengths throughout.
+  The test verified streaming after cold boot. Recovery from an injected
+  transfer failure was exercised in the native regression.
+
 ## Publication branches, 2026-11-20
 
 - Firmware 1.4.1 remains on `codex/v1.4.1` (release commit `67b2436`).

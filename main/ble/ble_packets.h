@@ -23,26 +23,18 @@ enum {
     IMU_RAW_FLAG_DMP_CONCURRENT = 1U << 6,
 };
 
-
-enum {
-    IMU_PACKET_VERSION_Q30 = 1,
-    IMU_PACKET_VERSION_Q14_COMPACT = 2,
-    IMU_RAW_PACKET_VERSION_FULL = 1,
-    IMU_RAW_PACKET_VERSION_COMPACT = 2,
-    STATUS_PACKET_VERSION_FULL = 1,
-    STATUS_PACKET_VERSION_COMPACT = 2,
-    AUX_PACKET_VERSION = 1,
-};
-
-#define IMU_PACKET_Q30_SIZE       28U
-#define IMU_PACKET_COMPACT_SIZE   20U
-#define IMU_RAW_FULL_V1_SIZE      36U
-#define IMU_RAW_COMPACT_V2_SIZE   20U
-#define STATUS_PACKET_FULL_SIZE   64U
-#define STATUS_PACKET_COMPACT_SIZE 20U
-#define AUX_PACKET_V1_SIZE 22U
 #define AUX_PACKET_CHANNEL_COUNT 8U
 
+_Static_assert(APP_AUX_ADC_CHANNEL_COUNT <= AUX_PACKET_CHANNEL_COUNT,
+               "Too many AUX ADC channels");
+#if CONFIG_AUX_ADC_ENABLED
+_Static_assert(APP_AUX_ADC_CHANNEL_COUNT >= 1,
+               "At least one AUX ADC channel is required");
+#if CONFIG_IDF_TARGET_ESP32C3
+_Static_assert(APP_AUX_ADC_CHANNEL_COUNT <= 3,
+               "ESP32-C3 supports at most three AUX channels");
+#endif
+#endif
 
 typedef struct {
     uint32_t sequence;
@@ -85,54 +77,3 @@ typedef struct {
     uint32_t timestamp_ms;
     int16_t values[AUX_PACKET_CHANNEL_COUNT];
 } adc_sample_t;
-
-size_t ble_encode_aux_for_mtu(uint8_t *out,
-    size_t capacity,
-    uint16_t mtu,
-    const adc_sample_t *sample);
-
-void ble_encode_aux(uint8_t out[AUX_PACKET_V1_SIZE],
-    uint32_t timestamp_ms, uint8_t sequence,
-    const int16_t values[AUX_PACKET_CHANNEL_COUNT]);
-
-void ble_encode_imu_q30(
-    uint8_t out[IMU_PACKET_Q30_SIZE],
-    const imu_dmp_sample_t *sample);
-
-void ble_encode_imu_compact(
-    uint8_t out[IMU_PACKET_COMPACT_SIZE],
-    const imu_dmp_sample_t *sample,
-    uint8_t requested_imu_rate_hz,
-    uint8_t actual_rate_hz);
-
-size_t ble_encode_imu_for_mtu(
-    uint8_t *out,
-    size_t capacity,
-    uint16_t mtu,
-    const imu_dmp_sample_t *sample);
-
-void ble_encode_imu_raw_full(
-    uint8_t out[IMU_RAW_FULL_V1_SIZE],
-    const imu_raw_sample_t *sample);
-
-void ble_encode_imu_raw_compact(
-    uint8_t out[IMU_RAW_COMPACT_V2_SIZE],
-    const imu_raw_sample_t *sample);
-
-size_t ble_encode_imu_raw_for_mtu(
-    uint8_t *out,
-    size_t capacity,
-    uint16_t mtu,
-    const imu_raw_sample_t *sample);
-
-
-void ble_encode_status_full(
-    uint8_t out[STATUS_PACKET_FULL_SIZE]);
-
-void ble_encode_status_compact(
-    uint8_t out[STATUS_PACKET_COMPACT_SIZE]);
-
-size_t ble_encode_status_for_mtu(
-    uint8_t *out,
-    size_t capacity,
-    uint16_t mtu);

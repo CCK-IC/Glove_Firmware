@@ -346,9 +346,9 @@ mainmenu "Project configuration"
             bool "Enable conservative BLE 4.2 compatibility defaults"
             default y
             help
-                Uses legacy-compatible security behavior, avoids immediate security
-                and connection-update procedures, uses LE 1M legacy advertising, and
-                permits compact packets at ATT MTU 23.
+                Uses legacy-compatible security behavior and LE 1M legacy
+                advertising. Avoids immediate security and connection-update
+                procedures.
 
         config BLE_INITIATE_SECURITY_ON_CONNECT
             bool "Initiate security immediately after connection"
@@ -408,8 +408,11 @@ mainmenu "Project configuration"
                 Default 600 is 6 seconds.
 
         config BLE_COMPACT_PACKET_FALLBACK
-            bool "Use compact packets when ATT MTU is small"
+            bool "Legacy v1/v2 compact-packet setting (unused)"
             default y
+            help
+                Retained for existing sdkconfig files. Protocol v3 uses
+                application fragmentation for frames that exceed the ATT MTU.
 
         config BLE_LOG_GAP_DETAILS
             bool "Log detailed GAP and security events"

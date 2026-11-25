@@ -4,6 +4,12 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 
+_Static_assert(BLE_BATCH_MAX_ENCODED_SIZE >= BLE_BATCH_DMP_MAX_SIZE &&
+               BLE_BATCH_MAX_ENCODED_SIZE >= BLE_BATCH_AUX_MAX_SIZE &&
+               BLE_BATCH_MAX_ENCODED_SIZE >= BLE_BATCH_STATUS_SIZE &&
+               BLE_BATCH_MAX_ENCODED_SIZE <= BLE_BATCH_MAX_FRAME_SIZE,
+               "encoded frame maximum must cover all v3 kinds within the protocol limit");
+
 static void u16(uint8_t *p, uint16_t v)
 {
     p[0] = (uint8_t)v;
@@ -19,9 +25,9 @@ static void u32(uint8_t *p, uint32_t v)
 static size_t slot_size(unsigned kind)
 {
     switch (kind) {
-    case BLE_BATCH_KIND_RAW: return 24;
-    case BLE_BATCH_KIND_DMP: return 22;
-    case BLE_BATCH_KIND_AUX: return 20;
+    case BLE_BATCH_KIND_RAW: return BLE_BATCH_RAW_SLOT_SIZE;
+    case BLE_BATCH_KIND_DMP: return BLE_BATCH_DMP_SLOT_SIZE;
+    case BLE_BATCH_KIND_AUX: return BLE_BATCH_AUX_SLOT_SIZE;
     default: return 0;
     }
 }
@@ -32,7 +38,7 @@ size_t ble_batch_frame_size(unsigned kind, size_t count)
     if (kind == BLE_BATCH_KIND_STATUS)
         return count == 1 ? BLE_BATCH_STATUS_SIZE : 0;
     size_t slot = slot_size(kind);
-    return slot ? BLE_BATCH_HEADER_SIZE + count * 2 * slot : 0;
+    return slot ? BLE_BATCH_SENSOR_FRAME_SIZE(slot, count) : 0;
 }
 
 static size_t value_capacity(uint16_t mtu)
@@ -47,10 +53,10 @@ size_t ble_batch_sample_limit(unsigned kind, uint16_t mtu)
     size_t capacity = value_capacity(mtu);
     if (!capacity) return 0;
     if (kind == BLE_BATCH_KIND_STATUS) return 1;
-    size_t slot = slot_size(kind);
-    if (!slot) return 0;
-    if (capacity < BLE_BATCH_HEADER_SIZE + 2 * slot) return BLE_BATCH_MAX_SAMPLES;
-    size_t count = (capacity - BLE_BATCH_HEADER_SIZE) / (2 * slot);
+    size_t row_size = BLE_BATCH_ROW_SIZE(slot_size(kind));
+    if (!row_size) return 0;
+    if (capacity < BLE_BATCH_HEADER_SIZE + row_size) return BLE_BATCH_MAX_SAMPLES;
+    size_t count = (capacity - BLE_BATCH_HEADER_SIZE) / row_size;
     return count < BLE_BATCH_MAX_SAMPLES ? count : BLE_BATCH_MAX_SAMPLES;
 }
 
@@ -85,11 +91,46 @@ static void prefix(uint8_t *p, uint32_t seq, uint32_t time,
     p[3] = flags;
 }
 
+static bool overlaps(const void *out, size_t out_size, const void *input, size_t input_size)
+{
+    uintptr_t dst = (uintptr_t)out;
+    uintptr_t src = (uintptr_t)input;
+    return dst <= src ? src - dst < out_size : dst - src < input_size;
+}
+
+/* An overlapping call encodes to a disjoint buffer before replacing its input.
+ * Keep this buffer off the stack for ordinary calls.
+ */
+static __attribute__((noinline)) size_t encode_overlapping(ble_batch_kind_t kind, uint8_t *out,
+    const void *input, size_t count, uint16_t rate_hz)
+{
+    uint8_t frame[BLE_BATCH_MAX_ENCODED_SIZE];
+    size_t length;
+    switch (kind) {
+    case BLE_BATCH_KIND_RAW:
+        length = ble_batch_encode_raw(frame, sizeof(frame), input, count);
+        break;
+    case BLE_BATCH_KIND_DMP:
+        length = ble_batch_encode_dmp(frame, sizeof(frame), input, count, rate_hz);
+        break;
+    case BLE_BATCH_KIND_AUX:
+        length = ble_batch_encode_aux(frame, sizeof(frame), input, count, rate_hz);
+        break;
+    default:
+        return 0;
+    }
+    if (length) memcpy(out, frame, length);
+    return length;
+}
+
 size_t ble_batch_encode_raw(uint8_t *out, size_t capacity,
                            const imu_raw_sample_t *samples, size_t count)
 {
-    size_t length = ble_batch_frame_size(BLE_BATCH_KIND_RAW, count);
-    if (!out || !samples || !length || capacity < length) return 0;
+    if (!out || !samples || !count || count > BLE_BATCH_MAX_SAMPLES) return 0;
+    size_t length = BLE_BATCH_SENSOR_FRAME_SIZE(BLE_BATCH_RAW_SLOT_SIZE, count);
+    if (capacity < length) return 0;
+    if (overlaps(out, length, samples, count * sizeof(*samples)))
+        return encode_overlapping(BLE_BATCH_KIND_RAW, out, samples, count, 0);
     const imu_raw_sample_t *base = samples;
     for (size_t i = 0; i < count; ++i) {
         const imu_raw_sample_t *s = samples + i;
@@ -101,18 +142,17 @@ size_t ble_batch_encode_raw(uint8_t *out, size_t capacity,
             !deltas(s->sequence, s->timestamp_ms, base->sequence, base->timestamp_ms,
                     prev->sequence, prev->timestamp_ms, i)) return 0;
     }
-    uint8_t frame[BLE_BATCH_MAX_FRAME_SIZE] = {0};
-    header(frame, BLE_BATCH_KIND_RAW, count, base->sequence, base->timestamp_ms,
+    memset(out, 0, length);
+    header(out, BLE_BATCH_KIND_RAW, count, base->sequence, base->timestamp_ms,
            base->actual_rate_hz, base->accel_range_code | (base->gyro_range_code << 2));
     for (size_t i = 0; i < count; ++i) {
         const imu_raw_sample_t *s = samples + i;
-        uint8_t *p = frame + BLE_BATCH_HEADER_SIZE + i * 48;
+        uint8_t *p = out + BLE_BATCH_HEADER_SIZE + i * BLE_BATCH_ROW_SIZE(BLE_BATCH_RAW_SLOT_SIZE);
         prefix(p, s->sequence, s->timestamp_ms, base->sequence, base->timestamp_ms, s->flags);
         const int16_t values[] = {s->accel_x, s->accel_y, s->accel_z,
             s->gyro_x, s->gyro_y, s->gyro_z, s->mag_x, s->mag_y, s->mag_z, s->temperature};
         for (size_t n = 0; n < 10; ++n) u16(p + 4 + n * 2, (uint16_t)values[n]);
     }
-    memcpy(out, frame, length);
     return length;
 }
 
@@ -120,8 +160,11 @@ size_t ble_batch_encode_dmp(uint8_t *out, size_t capacity,
                            const imu_dmp_sample_t *samples, size_t count,
                            uint16_t measured_rate_hz)
 {
-    size_t length = ble_batch_frame_size(BLE_BATCH_KIND_DMP, count);
-    if (!out || !samples || !length || capacity < length) return 0;
+    if (!out || !samples || !count || count > BLE_BATCH_MAX_SAMPLES) return 0;
+    size_t length = BLE_BATCH_SENSOR_FRAME_SIZE(BLE_BATCH_DMP_SLOT_SIZE, count);
+    if (capacity < length) return 0;
+    if (overlaps(out, length, samples, count * sizeof(*samples)))
+        return encode_overlapping(BLE_BATCH_KIND_DMP, out, samples, count, measured_rate_hz);
     const imu_dmp_sample_t *base = samples;
     for (size_t i = 0; i < count; ++i) {
         const imu_dmp_sample_t *s = samples + i;
@@ -130,12 +173,12 @@ size_t ble_batch_encode_dmp(uint8_t *out, size_t capacity,
             !deltas(s->sequence, s->timestamp_ms, base->sequence, base->timestamp_ms,
                     prev->sequence, prev->timestamp_ms, i)) return 0;
     }
-    uint8_t frame[BLE_BATCH_MAX_FRAME_SIZE] = {0};
-    header(frame, BLE_BATCH_KIND_DMP, count, base->sequence, base->timestamp_ms,
+    memset(out, 0, length);
+    header(out, BLE_BATCH_KIND_DMP, count, base->sequence, base->timestamp_ms,
            measured_rate_hz, 0);
     for (size_t i = 0; i < count; ++i) {
         const imu_dmp_sample_t *s = samples + i;
-        uint8_t *p = frame + BLE_BATCH_HEADER_SIZE + i * 44;
+        uint8_t *p = out + BLE_BATCH_HEADER_SIZE + i * BLE_BATCH_ROW_SIZE(BLE_BATCH_DMP_SLOT_SIZE);
         prefix(p, s->sequence, s->timestamp_ms, base->sequence, base->timestamp_ms, s->flags);
         u32(p + 4, (uint32_t)s->q0_q30);
         u32(p + 8, (uint32_t)s->q1_q30);
@@ -143,7 +186,6 @@ size_t ble_batch_encode_dmp(uint8_t *out, size_t capacity,
         u32(p + 16, (uint32_t)s->q3_q30);
         u16(p + 20, s->accuracy);
     }
-    memcpy(out, frame, length);
     return length;
 }
 
@@ -151,9 +193,12 @@ size_t ble_batch_encode_aux(uint8_t *out, size_t capacity,
                            const adc_sample_t *samples, size_t count,
                            uint16_t measured_rate_hz)
 {
-    size_t length = ble_batch_frame_size(BLE_BATCH_KIND_AUX, count);
-    if (!out || !samples || !length || capacity < length ||
+    if (!out || !samples || !count || count > BLE_BATCH_MAX_SAMPLES ||
         APP_AUX_ADC_CHANNEL_COUNT < 1 || APP_AUX_ADC_CHANNEL_COUNT > 8) return 0;
+    size_t length = BLE_BATCH_SENSOR_FRAME_SIZE(BLE_BATCH_AUX_SLOT_SIZE, count);
+    if (capacity < length) return 0;
+    if (overlaps(out, length, samples, count * sizeof(*samples)))
+        return encode_overlapping(BLE_BATCH_KIND_AUX, out, samples, count, measured_rate_hz);
     const adc_sample_t *base = samples;
     for (size_t i = 0; i < count; ++i) {
         const adc_sample_t *s = samples + i;
@@ -161,19 +206,18 @@ size_t ble_batch_encode_aux(uint8_t *out, size_t capacity,
         if (!deltas(s->sequence, s->timestamp_ms, base->sequence, base->timestamp_ms,
                     prev->sequence, prev->timestamp_ms, i)) return 0;
     }
-    uint8_t frame[BLE_BATCH_MAX_FRAME_SIZE] = {0};
-    header(frame, BLE_BATCH_KIND_AUX, count, base->sequence, base->timestamp_ms,
+    memset(out, 0, length);
+    header(out, BLE_BATCH_KIND_AUX, count, base->sequence, base->timestamp_ms,
            measured_rate_hz, APP_AUX_ADC_CHANNEL_COUNT);
     for (size_t i = 0; i < count; ++i) {
         const adc_sample_t *s = samples + i;
-        uint8_t *p = frame + BLE_BATCH_HEADER_SIZE + i * 40;
+        uint8_t *p = out + BLE_BATCH_HEADER_SIZE + i * BLE_BATCH_ROW_SIZE(BLE_BATCH_AUX_SLOT_SIZE);
         prefix(p, s->sequence, s->timestamp_ms, base->sequence, base->timestamp_ms, 1);
 #if APP_AUX_ADC_CHANNEL_COUNT > 0
         for (size_t n = 0; n < APP_AUX_ADC_CHANNEL_COUNT; ++n)
             u16(p + 4 + n * 2, (uint16_t)s->values[n]);
 #endif
     }
-    memcpy(out, frame, length);
     return length;
 }
 
@@ -246,12 +290,13 @@ size_t ble_batch_fragment(uint8_t *out, size_t capacity,
     size_t length = frame_length - offset;
     if (length > payload) length = payload;
     if (capacity < length + BLE_BATCH_FRAGMENT_HEADER_SIZE) return 0;
-    uint8_t fragment[BLE_BATCH_MAX_FRAME_SIZE] = {0xf3, frame[1]};
-    u16(fragment + 2, frame_id);
-    fragment[4] = (uint8_t)index;
-    fragment[5] = (uint8_t)count;
-    u16(fragment + 6, (uint16_t)frame_length);
-    memcpy(fragment + BLE_BATCH_FRAGMENT_HEADER_SIZE, frame + offset, length);
-    memcpy(out, fragment, length + BLE_BATCH_FRAGMENT_HEADER_SIZE);
+    uint8_t kind = frame[1];
+    memmove(out + BLE_BATCH_FRAGMENT_HEADER_SIZE, frame + offset, length);
+    out[0] = 0xf3;
+    out[1] = kind;
+    u16(out + 2, frame_id);
+    out[4] = (uint8_t)index;
+    out[5] = (uint8_t)count;
+    u16(out + 6, (uint16_t)frame_length);
     return length + BLE_BATCH_FRAGMENT_HEADER_SIZE;
 }

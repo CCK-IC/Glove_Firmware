@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run production packet/state/ADC code with sanitizer-backed host SDK shims."""
+"""Check legacy packets and production state/ADC code under sanitizers."""
 import os
 from pathlib import Path
 import subprocess
@@ -21,8 +21,6 @@ typedef int esp_err_t;
 #define ESP_LOGI(tag, ...) ((void)(tag))
 """,
     "esp_timer.h": "#include <stdint.h>\nint64_t esp_timer_get_time(void);\n",
-    "esp_system.h": "#include <stdint.h>\nuint32_t esp_get_free_heap_size(void);\nuint32_t esp_get_minimum_free_heap_size(void);\n",
-    "esp_heap_caps.h": "",
     "freertos/FreeRTOS.h": """#pragma once
 #include <stdint.h>
 typedef uint32_t TickType_t;
@@ -73,7 +71,6 @@ def config(target, count, dummy=False, bad_gpio=None):
     values = {
         "CONFIG_IMU_RAW_RATE_HZ": 100,
         "CONFIG_BATTERY_STATUS_PERIOD_MS": 1000,
-        "CONFIG_BLE_COMPACT_PACKET_FALLBACK": 1,
         "TEST_EXPECTED_CHANNEL_COUNT": count,
         "CONFIG_IDF_TARGET_ESP32" + target.upper(): 1,
         "CONFIG_TARGET_BOARD_XIAO_ESP32_" + target.upper(): 1,
@@ -131,7 +128,7 @@ with tempfile.TemporaryDirectory(prefix="glove-regression-") as temp:
         path = directory / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(contents)
-    packet_sources = [root / "main/system_state.c", root / "main/ble/ble_packets.c",
+    packet_sources = [root / "main/system_state.c", Path(__file__).with_name("legacy_ble_packets.c"),
                       Path(__file__).with_name("regression.c")]
     adc_sources = [root / "main/system_state.c", root / "main/adc/adc_manager.c", root / "main/ble/ble_sample_buffer.c",
                    Path(__file__).with_name("adc_regression.c")]

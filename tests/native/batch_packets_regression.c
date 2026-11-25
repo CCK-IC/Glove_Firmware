@@ -200,6 +200,59 @@ static void test_status(void) {
     assert(timer_calls == tc && heap_calls == hc);
 }
 
+static void test_overlapping_encoders(void) {
+    struct overlapping_buffer {
+        uint8_t before[8];
+        union {
+            imu_raw_sample_t raw[8];
+            imu_dmp_sample_t dmp[8];
+            adc_sample_t aux[8];
+            system_state_t state;
+        } input;
+        uint8_t after[BLE_BATCH_MAX_ENCODED_SIZE];
+    } buffer = {0};
+    system_state_t state = status_state();
+    uint8_t expected[BLE_BATCH_MAX_ENCODED_SIZE];
+    uint8_t *input = (uint8_t *)&buffer + offsetof(struct overlapping_buffer, input);
+    for (unsigned kind = 1; kind <= 4; ++kind) {
+        if (kind == 3 && APP_AUX_ADC_CHANNEL_COUNT == 0) continue;
+        size_t length = kind == 4 ? ble_batch_encode_status(expected, sizeof(expected), &state) :
+            encode(kind, expected, sizeof(expected), 8);
+        assert(length);
+        for (int shift = -1; shift <= 1; ++shift) {
+            uint8_t *out = input + shift;
+            size_t n;
+            switch (kind) {
+            case BLE_BATCH_KIND_RAW:
+                memcpy(buffer.input.raw, raw, sizeof(raw));
+                n = ble_batch_encode_raw(out, length, buffer.input.raw, 8);
+                break;
+            case BLE_BATCH_KIND_DMP:
+                memcpy(buffer.input.dmp, dmp, sizeof(dmp));
+                n = ble_batch_encode_dmp(out, length, buffer.input.dmp, 8, 456);
+                break;
+            case BLE_BATCH_KIND_AUX:
+                memcpy(buffer.input.aux, aux, sizeof(aux));
+                n = ble_batch_encode_aux(out, length, buffer.input.aux, 8, 789);
+                break;
+            case BLE_BATCH_KIND_STATUS:
+                buffer.input.state = state;
+                n = ble_batch_encode_status(out, length, &buffer.input.state);
+                break;
+            default:
+                abort();
+            }
+            assert(n == length && !memcmp(out, expected, n));
+        }
+    }
+    memcpy(buffer.input.raw, raw, sizeof(raw));
+    buffer.input.raw[7].flags = 0x80;
+    uint8_t unchanged[sizeof(buffer)];
+    memcpy(unchanged, &buffer, sizeof(buffer));
+    assert(!ble_batch_encode_raw(input, sizeof(expected), buffer.input.raw, 8));
+    assert(!memcmp(unchanged, &buffer, sizeof(buffer)));
+}
+
 static void test_limits(void) {
     const uint16_t mtus[] = {23, 128, 247, 517};
     const size_t expected[][3] = {{8,8,8}, {2,2,2}, {4,4,5}, {8,8,8}};
@@ -207,8 +260,12 @@ static void test_limits(void) {
         for (unsigned k = 1; k <= 3; ++k) assert(ble_batch_sample_limit(k, mtus[m]) == expected[m][k-1]);
         assert(ble_batch_sample_limit(4, mtus[m]) == 1);
     }
+    const size_t single_sizes[] = {BLE_BATCH_RAW_SINGLE_SIZE, BLE_BATCH_DMP_SINGLE_SIZE, BLE_BATCH_AUX_SINGLE_SIZE};
+    const size_t max_sizes[] = {BLE_BATCH_RAW_MAX_SIZE, BLE_BATCH_DMP_MAX_SIZE, BLE_BATCH_AUX_MAX_SIZE};
     for (unsigned k = 1; k <= 3; ++k) {
         size_t row = ble_batch_frame_size(k, 1);
+        assert(row == single_sizes[k - 1]);
+        assert(ble_batch_frame_size(k, 8) == max_sizes[k - 1]);
         assert(ble_batch_sample_limit(k, (uint16_t)(row + 2)) == 8);
         assert(ble_batch_sample_limit(k, (uint16_t)(row + 3)) == 1);
     }
@@ -260,12 +317,20 @@ static void test_fragments(void) {
                 REJECT(ble_batch_fragment(invalid_out, 512, frame, length, mtu, 0, count));
                 REJECT(ble_batch_fragment(invalid_out, 512, frame, length, mtu, 0, UINT_MAX));
             }
-            uint8_t copy[512]; memcpy(copy, frame, length);
+            uint8_t copy[520]; memcpy(copy, frame, length);
             size_t n = ble_batch_fragment(copy, 512, copy, length, 517, 0, 0);
             assert(n == length && !memcmp(copy, frame, length));
-            memcpy(copy, frame, length);
-            assert(ble_batch_fragment(copy, 512, copy, length, 23, 0, 0) == 20);
-            assert(copy[2] == 0 && copy[3] == 0); /* frame ID wrap to zero */
+            for (unsigned index = 0; index < 2; ++index) {
+                uint8_t expected[20];
+                n = ble_batch_fragment(expected, sizeof(expected), frame, length, 23, 0, index);
+                assert(n == sizeof(expected));
+                assert(expected[2] == 0 && expected[3] == 0); /* frame ID wrap to zero */
+                for (size_t shift = 0; shift <= 16; shift += 8) {
+                    memcpy(copy + 8, frame, length);
+                    assert(ble_batch_fragment(copy + shift, n, copy + 8, length, 23, 0, index) == n);
+                    assert(!memcmp(copy + shift, expected, n));
+                }
+            }
             REJECT(ble_batch_fragment(invalid_out, 512, NULL, length, 23, 0, 0));
             assert(!ble_batch_fragment(NULL, 512, frame, length, 23, 0, 0));
             frame[0] = 2; REJECT(ble_batch_fragment(invalid_out, 512, frame, length, 23, 0, 0)); frame[0] = 3;
@@ -328,7 +393,7 @@ static void fixtures(const char *path) {
 
 int main(int argc, char **argv) {
     init_samples();
-    test_limits(); test_layouts(); test_invalid(); test_status(); test_fragments();
+    test_limits(); test_layouts(); test_invalid(); test_status(); test_overlapping_encoders(); test_fragments();
     if (argc == 2) fixtures(argv[1]); else assert(argc == 1);
     puts("PASS: v3 paired layouts, signed/wrap/delta limits, zero peer/inactive slots, immutable status, atomic rejection, MTU/fragment round trips (ASan/UBSan)");
     return 0;

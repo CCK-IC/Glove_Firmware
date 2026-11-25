@@ -26,24 +26,33 @@ const ble_uuid128_t UUID_STATUS_SERVICE = XIAO_UUID128(0x20);
 const ble_uuid128_t UUID_STATUS_DATA = XIAO_UUID128(0x21);
 const ble_uuid128_t UUID_CONTROL = XIAO_UUID128(0x22);
 
-uint16_t gatt_dmp_handle;
-uint16_t gatt_imu_raw_handle;
-uint16_t gatt_aux_handle;
-uint16_t gatt_status_handle;
-uint16_t gatt_control_handle;
-uint16_t gatt_battery_handle;
-
-static atomic_bool s_dmp_notifications_enabled;
-static atomic_bool s_raw_notifications_enabled;
-static atomic_bool s_aux_notifications_enabled;
-static atomic_bool s_status_notifications_enabled;
-static atomic_bool s_battery_notifications_enabled;
+static uint16_t s_stream_handles[GATT_STREAM_COUNT + 1];
+static uint16_t s_control_handle;
+static atomic_bool s_subscribed[GATT_STREAM_COUNT + 1];
+static atomic_uint s_periodic_epochs[GATT_STREAM_COUNT - BLE_BATCH_KIND_STATUS + 1];
 static uint8_t s_control_reply[4];
-static atomic_uint s_status_epoch;
-static atomic_uint s_battery_epoch;
+
 /* Host callbacks are serialized. Hold one snapshot stable across ATT Read Blob. */
-static uint8_t s_read_frames[4][BLE_BATCH_MAX_FRAME_SIZE];
-static size_t s_read_lengths[4];
+static const struct {
+    uint8_t *data;
+    size_t capacity;
+} s_read_frames[BLE_BATCH_KIND_STATUS + 1] = {
+    [BLE_BATCH_KIND_RAW] = {(uint8_t[BLE_BATCH_RAW_SINGLE_SIZE]){0}, BLE_BATCH_RAW_SINGLE_SIZE},
+#if CONFIG_IMU_DMP_ENABLED || CONFIG_IMU_DMP_DUMMY
+    [BLE_BATCH_KIND_DMP] = {(uint8_t[BLE_BATCH_DMP_SINGLE_SIZE]){0}, BLE_BATCH_DMP_SINGLE_SIZE},
+#endif
+    [BLE_BATCH_KIND_AUX] = {(uint8_t[BLE_BATCH_AUX_SINGLE_SIZE]){0}, BLE_BATCH_AUX_SINGLE_SIZE},
+    [BLE_BATCH_KIND_STATUS] = {(uint8_t[BLE_BATCH_STATUS_SIZE]){0}, BLE_BATCH_STATUS_SIZE},
+};
+static size_t s_read_lengths[BLE_BATCH_KIND_STATUS + 1];
+
+static unsigned stream_for_handle(uint16_t attr)
+{
+    if (!attr) return 0;
+    for (unsigned kind = 1; kind <= GATT_STREAM_COUNT; ++kind)
+        if (s_stream_handles[kind] == attr) return kind;
+    return 0;
+}
 
 /* Wire command values are part of the client protocol. */
 typedef enum {
@@ -71,6 +80,29 @@ static int copy_control_write(struct os_mbuf *om, void *dst, uint16_t max,
         ? 0 : BLE_ATT_ERR_UNLIKELY;
 }
 
+static size_t encode_read_frame(unsigned kind, uint8_t *packet, size_t capacity)
+{
+    if (kind == BLE_BATCH_KIND_RAW) {
+        imu_raw_sample_t sample;
+        return imu_manager_latest_raw(&sample)
+            ? ble_batch_encode_raw(packet, capacity, &sample, 1) : 0;
+    }
+
+    system_state_t state;
+    system_state_snapshot(&state);
+    if (kind == BLE_BATCH_KIND_DMP) {
+        imu_dmp_sample_t sample;
+        return imu_manager_latest_dmp(&sample)
+            ? ble_batch_encode_dmp(packet, capacity, &sample, 1, state.actual_dmp_sample_rate_hz) : 0;
+    }
+    if (kind == BLE_BATCH_KIND_AUX) {
+        adc_sample_t sample;
+        return adc_manager_latest(&sample)
+            ? ble_batch_encode_aux(packet, capacity, &sample, 1, state.actual_adc_sample_rate_hz) : 0;
+    }
+    return ble_batch_encode_status(packet, capacity, &state);
+}
+
 static int handle_gatt_access(uint16_t conn, uint16_t attr,
                      struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -78,43 +110,19 @@ static int handle_gatt_access(uint16_t conn, uint16_t attr,
     (void)conn;
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        unsigned kind = attr == gatt_imu_raw_handle ? BLE_BUFFER_RAW :
-                        attr == gatt_dmp_handle ? BLE_BUFFER_DMP :
-                        attr == gatt_aux_handle ? BLE_BUFFER_AUX :
-                        attr == gatt_status_handle ? 4 : 0;
-        if (kind) {
-            uint8_t *packet = s_read_frames[kind - 1];
-            size_t *length = &s_read_lengths[kind - 1];
-            if (ctxt->offset == 0) {
-                *length = 0;
-                system_state_t state;
-                system_state_snapshot(&state);
-                if (kind == BLE_BUFFER_RAW) {
-                    imu_raw_sample_t sample;
-                    if (imu_manager_latest_raw(&sample))
-                        *length = ble_batch_encode_raw(packet, BLE_BATCH_MAX_FRAME_SIZE, &sample, 1);
-                } else if (kind == BLE_BUFFER_DMP) {
-                    imu_dmp_sample_t sample;
-                    if (imu_manager_latest_dmp(&sample))
-                        *length = ble_batch_encode_dmp(packet, BLE_BATCH_MAX_FRAME_SIZE, &sample, 1,
-                                                       state.actual_dmp_sample_rate_hz);
-                } else if (kind == BLE_BUFFER_AUX) {
-                    adc_sample_t sample;
-                    if (adc_manager_latest(&sample))
-                        *length = ble_batch_encode_aux(packet, BLE_BATCH_MAX_FRAME_SIZE, &sample, 1,
-                                                       state.actual_adc_sample_rate_hz);
-                } else {
-                    *length = ble_batch_encode_status(packet, BLE_BATCH_MAX_FRAME_SIZE, &state);
-                }
-            }
-            if (!*length) return BLE_ATT_ERR_UNLIKELY;
-            return append_read_response(ctxt->om, packet, *length);
+        unsigned kind = stream_for_handle(attr);
+        if (kind && kind <= BLE_BATCH_KIND_STATUS) {
+            uint8_t *packet = s_read_frames[kind].data;
+            if (ctxt->offset == 0)
+                s_read_lengths[kind] = encode_read_frame(kind, packet, s_read_frames[kind].capacity);
+            if (!s_read_lengths[kind]) return BLE_ATT_ERR_UNLIKELY;
+            return append_read_response(ctxt->om, packet, s_read_lengths[kind]);
         }
-        if (attr == gatt_control_handle) {
+        if (attr == s_control_handle) {
             return append_read_response(ctxt->om, s_control_reply,
                           sizeof(s_control_reply));
         }
-        if (attr == gatt_battery_handle) {
+        if (kind == GATT_STREAM_BATTERY) {
             system_state_t state;
             system_state_snapshot(&state);
             return append_read_response(ctxt->om, &state.battery_percent, 1);
@@ -131,7 +139,7 @@ static int handle_gatt_access(uint16_t conn, uint16_t attr,
     }
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR &&
-        attr == gatt_control_handle) {
+        attr == s_control_handle) {
         uint8_t data[8];
         uint16_t len = 0;
         int rc = copy_control_write(ctxt->om, data, sizeof(data), &len);
@@ -143,16 +151,11 @@ static int handle_gatt_access(uint16_t conn, uint16_t attr,
         s_control_reply[0] = data[0];
         s_control_reply[1] = 0;
 
-        system_state_t state;
-        system_state_snapshot(&state);
-
         switch (data[0]) {
         case CONTROL_SET_IMU_RATE:
             if (len != 3 || value < 1 || value > 200)
                 return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
-            state.requested_imu_rate_hz = value;
-            SYSTEM_STATE_SET(requested_imu_rate_hz, state.requested_imu_rate_hz);
-
+            SYSTEM_STATE_SET(requested_imu_rate_hz, value);
             break;
         case CONTROL_SET_ADC_RATE:
 #if CONFIG_AUX_ADC_ENABLED
@@ -166,26 +169,22 @@ static int handle_gatt_access(uint16_t conn, uint16_t attr,
         case CONTROL_SET_STATUS_PERIOD:
             if (len != 3 || value < 250)
                 return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
-            state.status_period_ms = value;
-            SYSTEM_STATE_SET(status_period_ms, state.status_period_ms);
-
+            SYSTEM_STATE_SET(status_period_ms, value);
             break;
         case CONTROL_START_PAIRING:
             return app_event_publish(APP_EVENT_BUTTON_HOLD, 0) == ESP_OK
                 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
-        case CONTROL_SET_SLOW_MODE:
+        case CONTROL_SET_SLOW_MODE: {
             if (len != 2 || data[1] > 1)
                 return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
-            state.slow_mode = data[1];
-            SYSTEM_STATE_SET(slow_mode, state.slow_mode);
-            state.requested_imu_rate_hz = data[1] ?
-                APP_IMU_SLOW_RATE_HZ : APP_IMU_NORMAL_RATE_HZ;
-            SYSTEM_STATE_SET(requested_imu_rate_hz, state.requested_imu_rate_hz);
+            bool slow_mode = data[1];
+            uint32_t rate_hz = slow_mode ? APP_IMU_SLOW_RATE_HZ : APP_IMU_NORMAL_RATE_HZ;
+            SYSTEM_STATE_SET(slow_mode, slow_mode);
+            SYSTEM_STATE_SET(requested_imu_rate_hz, rate_hz);
             ESP_LOGI("BLE_CTRL", "slow_mode=%u, rate=%luHz",
-                     state.slow_mode,
-                     (unsigned long)state.requested_imu_rate_hz);
-
+                     slow_mode, (unsigned long)rate_hz);
             break;
+        }
         case CONTROL_POWER_OFF:
             if (len != 3 || data[1] != 0xA5 || data[2] != 0x5A)
                 return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
@@ -211,7 +210,7 @@ static const struct ble_gatt_svc_def services[] = {
             {
                 .uuid = BLE_UUID16_DECLARE(0x2A19),
                 .access_cb = handle_gatt_access,
-                .val_handle = &gatt_battery_handle,
+                .val_handle = &s_stream_handles[GATT_STREAM_BATTERY],
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
             }, {0}
         }
@@ -239,14 +238,14 @@ static const struct ble_gatt_svc_def services[] = {
             {
                 .uuid = &UUID_IMU_QUAT.u,
                 .access_cb = handle_gatt_access,
-                .val_handle = &gatt_dmp_handle,
+                .val_handle = &s_stream_handles[BLE_BATCH_KIND_DMP],
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
             },
 #endif
             {
                 .uuid = &UUID_IMU_RAW.u,
                 .access_cb = handle_gatt_access,
-                .val_handle = &gatt_imu_raw_handle,
+                .val_handle = &s_stream_handles[BLE_BATCH_KIND_RAW],
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
             }, {0}
         }
@@ -258,7 +257,7 @@ static const struct ble_gatt_svc_def services[] = {
             {
                 .uuid = &UUID_AUX_DATA.u,
                 .access_cb = handle_gatt_access,
-                .val_handle = &gatt_aux_handle,
+                .val_handle = &s_stream_handles[BLE_BATCH_KIND_AUX],
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
             }, {0}
         }
@@ -270,12 +269,12 @@ static const struct ble_gatt_svc_def services[] = {
             {
                 .uuid = &UUID_STATUS_DATA.u,
                 .access_cb = handle_gatt_access,
-                .val_handle = &gatt_status_handle,
+                .val_handle = &s_stream_handles[BLE_BATCH_KIND_STATUS],
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
             }, {
                 .uuid = &UUID_CONTROL.u,
                 .access_cb = handle_gatt_access,
-                .val_handle = &gatt_control_handle,
+                .val_handle = &s_control_handle,
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE |
                          BLE_GATT_CHR_F_NOTIFY,
             }, {0}
@@ -294,34 +293,22 @@ int gatt_server_init(void)
     return ble_gatts_add_svcs(services);
 }
 
-void gatt_server_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
-{
-    (void)ctxt;
-    (void)arg;
-}
-
 void gatt_set_subscription(uint16_t attr, bool enabled)
 {
-    if (attr == gatt_dmp_handle) {
-        ble_sample_buffer_set_enabled(BLE_BUFFER_DMP, enabled);
-        atomic_store(&s_dmp_notifications_enabled, enabled);
-        SYSTEM_STATE_SET(imu_dmp_subscribed, enabled);
-    } else if (attr == gatt_imu_raw_handle) {
-        ble_sample_buffer_set_enabled(BLE_BUFFER_RAW, enabled);
-        atomic_store(&s_raw_notifications_enabled, enabled);
-        SYSTEM_STATE_SET(imu_raw_subscribed, enabled);
-    } else if (attr == gatt_aux_handle) {
-        ble_sample_buffer_set_enabled(BLE_BUFFER_AUX, enabled);
-        atomic_store(&s_aux_notifications_enabled, enabled);
-        SYSTEM_STATE_SET(aux_subscribed, enabled);
-    } else if (attr == gatt_status_handle) {
-        if (atomic_load(&s_status_notifications_enabled) != enabled)
-            atomic_fetch_add(&s_status_epoch, 1);
-        atomic_store(&s_status_notifications_enabled, enabled);
-    } else if (attr == gatt_battery_handle) {
-        if (atomic_load(&s_battery_notifications_enabled) != enabled)
-            atomic_fetch_add(&s_battery_epoch, 1);
-        atomic_store(&s_battery_notifications_enabled, enabled);
+    unsigned kind = stream_for_handle(attr);
+    if (!kind) return;
+    if (kind <= BLE_BUFFER_AUX) {
+        ble_sample_buffer_set_enabled(kind, enabled);
+    } else if (atomic_load(&s_subscribed[kind]) != enabled) {
+        atomic_fetch_add(&s_periodic_epochs[kind - BLE_BATCH_KIND_STATUS], 1);
+    }
+    atomic_store(&s_subscribed[kind], enabled);
+
+    switch (kind) {
+    case BLE_BUFFER_RAW: SYSTEM_STATE_SET(imu_raw_subscribed, enabled); break;
+    case BLE_BUFFER_DMP: SYSTEM_STATE_SET(imu_dmp_subscribed, enabled); break;
+    case BLE_BUFFER_AUX: SYSTEM_STATE_SET(aux_subscribed, enabled); break;
+    default: break;
     }
 }
 
@@ -329,40 +316,28 @@ void gatt_clear_subscriptions(void)
 {
     ble_sample_buffer_disable_all();
     memset(s_read_lengths, 0, sizeof(s_read_lengths));
-    atomic_fetch_add(&s_status_epoch, 1);
-    atomic_fetch_add(&s_battery_epoch, 1);
-    atomic_store(&s_dmp_notifications_enabled, false);
-    atomic_store(&s_raw_notifications_enabled, false);
-    atomic_store(&s_aux_notifications_enabled, false);
-    atomic_store(&s_status_notifications_enabled, false);
-    atomic_store(&s_battery_notifications_enabled, false);
+    for (unsigned kind = BLE_BATCH_KIND_STATUS; kind <= GATT_STREAM_COUNT; ++kind)
+        atomic_fetch_add(&s_periodic_epochs[kind - BLE_BATCH_KIND_STATUS], 1);
+    for (unsigned kind = 1; kind <= GATT_STREAM_COUNT; ++kind)
+        atomic_store(&s_subscribed[kind], false);
     SYSTEM_STATE_SET(imu_dmp_subscribed, false);
     SYSTEM_STATE_SET(imu_raw_subscribed, false);
     SYSTEM_STATE_SET(aux_subscribed, false);
 }
 
-bool gatt_dmp_subscribed(void) { return atomic_load(&s_dmp_notifications_enabled); }
-bool gatt_imu_raw_subscribed(void) { return atomic_load(&s_raw_notifications_enabled); }
-bool gatt_aux_subscribed(void) { return atomic_load(&s_aux_notifications_enabled); }
-bool gatt_status_subscribed(void) { return atomic_load(&s_status_notifications_enabled); }
-bool gatt_battery_subscribed(void) { return atomic_load(&s_battery_notifications_enabled); }
+uint16_t gatt_stream_handle(unsigned kind)
+{
+    return kind <= GATT_STREAM_COUNT ? s_stream_handles[kind] : 0;
+}
 
 uint32_t gatt_stream_epoch(unsigned kind)
 {
-    if (kind >= 1 && kind <= 3) return ble_sample_buffer_epoch(kind);
-    if (kind == 4) return atomic_load(&s_status_epoch);
-    if (kind == 5) return atomic_load(&s_battery_epoch);
-    return 0;
+    if (kind < BLE_BATCH_KIND_STATUS) return ble_sample_buffer_epoch(kind);
+    return kind <= GATT_STREAM_COUNT
+        ? atomic_load(&s_periodic_epochs[kind - BLE_BATCH_KIND_STATUS]) : 0;
 }
 
 bool gatt_stream_subscribed(unsigned kind)
 {
-    switch (kind) {
-    case BLE_BUFFER_RAW: return gatt_imu_raw_subscribed();
-    case BLE_BUFFER_DMP: return gatt_dmp_subscribed();
-    case BLE_BUFFER_AUX: return gatt_aux_subscribed();
-    case 4: return gatt_status_subscribed();
-    case 5: return gatt_battery_subscribed();
-    default: return false;
-    }
+    return kind <= GATT_STREAM_COUNT && atomic_load(&s_subscribed[kind]);
 }

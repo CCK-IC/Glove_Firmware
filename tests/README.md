@@ -19,11 +19,11 @@ These tests do not establish physical I2C timing or sensor operation.
 
 
 Run `python3 tests/native/run.py` on macOS with a C compiler. This compiles the
-actual packet encoder, state manager, and ADC manager with minimal host SDK
-shims, using AddressSanitizer and UndefinedBehaviorSanitizer. It checks AUX
-buffer guards, MTU/capacity boundaries, active and zero-filled channel fields,
-real/dummy sampling, averaging, invalid pin mappings, failure recovery, disabled
-ADC, signed quaternion encoding,
+test-only legacy packet encoders and production state and ADC managers with
+minimal host SDK shims, using AddressSanitizer and UndefinedBehaviorSanitizer.
+It checks AUX buffer guards, MTU/capacity boundaries, active and zero-filled
+channel fields, real and dummy sampling, averaging, invalid pin mappings,
+failure recovery, disabled ADC, signed quaternion encoding,
 two concurrent writers incrementing shared counters, disconnected shutdown
 deadlines, brief reconnections, and competing shutdown claims.
 

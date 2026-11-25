@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "ble/ble_sample_buffer.h"
-#include "ble/ble_batch_packets.h"
+#include "ble/gatt_server.h"
 #include "freertos/semphr.h"
 #include "esp_timer.h"
 
@@ -29,8 +29,6 @@ static SemaphoreHandle_t s_connection_lock = &connection_mutex;
 static uint16_t s_connection_handle = 1;
 static atomic_bool s_notifications_enabled = true;
 static atomic_uint s_connection_generation = 1;
-static uint16_t gatt_imu_raw_handle = 11, gatt_dmp_handle = 12,
-    gatt_aux_handle = 13, gatt_status_handle = 14, gatt_battery_handle = 15;
 static system_state_t state;
 static bool subscribed[5];
 static uint32_t other_epochs[2];
@@ -59,10 +57,9 @@ static int ble_gatts_notify_custom(uint16_t conn, uint16_t handle, struct os_mbu
 static void *nimble_port_get_dflt_eventq(void) { return NULL; }
 static void ble_npl_eventq_put(void *queue, struct ble_npl_event *event)
 { (void)queue; (void)event; assert(!queued); queued = true; }
-static bool gatt_stream_subscribed(unsigned kind) { return subscribed[kind - 1]; }
-static bool gatt_status_subscribed(void) { return subscribed[3]; }
-static bool gatt_battery_subscribed(void) { return subscribed[4]; }
-static uint32_t gatt_stream_epoch(unsigned kind)
+bool gatt_stream_subscribed(unsigned kind) { return subscribed[kind - 1]; }
+uint16_t gatt_stream_handle(unsigned kind) { return 10 + kind; }
+uint32_t gatt_stream_epoch(unsigned kind)
 {
     uint32_t epoch = kind <= 3 ? ble_sample_buffer_epoch(kind) : other_epochs[kind - 4];
     /* Disconnect just after the pending frame's old epoch was read, before

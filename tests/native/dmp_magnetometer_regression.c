@@ -7,7 +7,9 @@
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#define imu_magnetometer_configure fake_magnetometer_configure
 #include "../../main/imu/imu_manager.c"
+#undef imu_magnetometer_configure
 
 typedef struct {
     icm20948_status_e status;
@@ -18,10 +20,12 @@ typedef struct {
 static frame_t frames[16];
 static unsigned queued, consumed, fifo_reads, resets, reports, agmt_reads, raw_aux_calls;
 static int64_t clock_us;
-static icm20948_status_e reset_result, agmt_result;
+static icm20948_status_e reset_result, agmt_result, sample_mode_result;
 static esp_err_t agmt_transport_error;
-static bool runtime_sensor_asleep;
-static unsigned bus_resets, transport_attaches, transport_begins;
+static bool runtime_sensor_asleep, raw_aux_nack;
+static unsigned bus_resets, sensor_resets, transport_attaches, transport_begins;
+static unsigned device_removals, device_additions;
+static uint32_t added_clock_hz;
 static int scl_level, sda_level;
 static system_state_t shared;
 static uint32_t buffer_epochs[4];
@@ -63,6 +67,94 @@ esp_err_t i2c_master_bus_reset(i2c_master_bus_handle_t bus) {
     ++bus_resets;
     return ESP_OK;
 }
+esp_err_t i2c_master_bus_add_device(i2c_master_bus_handle_t bus,
+                                   const i2c_device_config_t *config,
+                                   i2c_master_dev_handle_t *device) {
+    assert(bus == board_i2c_bus() && config->device_address == CONFIG_IMU_I2C_ADDRESS);
+    assert(!s_i2c_config.dev_handle);
+    ++device_additions;
+    added_clock_hz = config->scl_speed_hz;
+    *device = (void *)3;
+    return ESP_OK;
+}
+esp_err_t i2c_master_bus_rm_device(i2c_master_dev_handle_t device) {
+    assert(device && device == s_i2c_config.dev_handle);
+    ++device_removals;
+    return ESP_OK;
+}
+void icm20948_init_i2c(icm20948_device_t *device, icm0948_config_i2c_t *config) {
+    assert(device == &s_sensor && config == &s_i2c_config && config->dev_handle);
+    device->_last_bank = 255;
+    device->_last_mems_bank = 255;
+}
+icm20948_status_e icm20948_sw_reset(icm20948_device_t *device) {
+    assert(device == &s_sensor);
+    ++sensor_resets;
+    return ICM_20948_STAT_OK;
+}
+icm20948_status_e icm20948_sleep(icm20948_device_t *device, bool enabled) {
+    assert(device == &s_sensor && !enabled);
+    return ICM_20948_STAT_OK;
+}
+icm20948_status_e icm20948_low_power(icm20948_device_t *device, bool enabled) {
+    assert(device == &s_sensor && !enabled);
+    return ICM_20948_STAT_OK;
+}
+icm20948_status_e icm20948_set_sample_mode(icm20948_device_t *device,
+    icm20948_internal_sensor_id_bm sensors, icm20948_lp_config_cycle_e mode) {
+    assert(device == &s_sensor && sensors && mode == SAMPLE_MODE_CONTINUOUS);
+    return sample_mode_result;
+}
+icm20948_status_e icm20948_set_full_scale(icm20948_device_t *device,
+    icm20948_internal_sensor_id_bm sensors, icm20948_fss_t scale) {
+    assert(device == &s_sensor && sensors && scale.a == GPM_2 && scale.g == DPS_250);
+    return ICM_20948_STAT_OK;
+}
+icm20948_status_e icm20948_set_dlpf_cfg(icm20948_device_t *device,
+    icm20948_internal_sensor_id_bm sensors, icm20948_dlpcfg_t filter) {
+    assert(device == &s_sensor && sensors && filter.a == ACC_D473BW_N499BW);
+    return ICM_20948_STAT_OK;
+}
+icm20948_status_e icm20948_enable_dlpf(icm20948_device_t *device,
+    icm20948_internal_sensor_id_bm sensors, bool enabled) {
+    assert(device == &s_sensor && sensors && !enabled);
+    return ICM_20948_STAT_OK;
+}
+icm20948_status_e fake_magnetometer_configure(icm20948_device_t *device,
+                                           imu_magnetometer_t *magnetometer, bool dmp) {
+    assert(device == &s_sensor && magnetometer == &s_magnetometer && dmp);
+    return ICM_20948_STAT_OK;
+}
+icm20948_status_e icm20948_init_dmp_sensor_with_defaults(icm20948_device_t *device) {
+    assert(device == &s_sensor);
+    return ICM_20948_STAT_OK;
+}
+icm20948_status_e inv_icm20948_enable_dmp_sensor(icm20948_device_t *device,
+                                              enum inv_icm20948_sensor sensor, int enabled) {
+    assert(device == &s_sensor && enabled == 1);
+    assert(sensor == INV_ICM20948_SENSOR_ORIENTATION ||
+           sensor == INV_ICM20948_SENSOR_MAGNETIC_FIELD_UNCALIBRATED);
+    return ICM_20948_STAT_OK;
+}
+icm20948_status_e inv_icm20948_set_dmp_sensor_period(icm20948_device_t *device,
+                                                   enum DMP_ODR_Registers register_id,
+                                                   uint16_t interval) {
+    assert(device == &s_sensor && !interval);
+    assert(register_id == DMP_ODR_Reg_Quat9 || register_id == DMP_ODR_Reg_Cpass);
+    return ICM_20948_STAT_OK;
+}
+icm20948_status_e icm20948_enable_fifo(icm20948_device_t *device, bool enabled) {
+    assert(device == &s_sensor && enabled);
+    return ICM_20948_STAT_OK;
+}
+icm20948_status_e icm20948_enable_dmp(icm20948_device_t *device, bool enabled) {
+    assert(device == &s_sensor && enabled);
+    return ICM_20948_STAT_OK;
+}
+icm20948_status_e icm20948_reset_dmp(icm20948_device_t *device) {
+    assert(device == &s_sensor);
+    return ICM_20948_STAT_OK;
+}
 void imu_i2c_attach(imu_i2c_transport_t *transport, icm20948_device_t *device) {
     assert(transport == &s_i2c && device == &s_sensor && transport->device);
     ++transport_attaches;
@@ -74,7 +166,7 @@ void imu_i2c_begin(imu_i2c_transport_t *transport, int timeout_ms) {
     transport->first_error = ESP_OK;
 }
 icm20948_status_e icm20948_get_who_am_i(icm20948_device_t *device, uint8_t *identity) {
-    assert(s_runtime_recovery_armed && device == &s_sensor);
+    assert(device == &s_sensor);
     assert(device->_last_bank == 255 && device->_last_mems_bank == 255);
     *identity = ICM_20948_WHOAMI;
     device->_last_bank = 0;
@@ -93,7 +185,8 @@ icm20948_status_e inv_icm20948_read_dmp_data(icm20948_device_t *device, icm_2094
 }
 icm20948_status_e icm20948_reset_fifo(icm20948_device_t *device) {
     assert(device == &s_sensor);
-    assert(device->_last_bank == 255 || (s_runtime_recovery_armed && device->_last_bank == 0));
+    assert(device->_last_bank == 255 ||
+           ((!s_sensor_ready || s_runtime_recovery_armed) && device->_last_bank == 0));
     ++resets;
     /* A failed bank-select write can leave a plausible but incorrect cache.
      * Every recovery retry must invalidate it again before reaching here. */
@@ -112,12 +205,21 @@ icm20948_status_e icm20948_get_agmt(icm20948_device_t *device, icm20948_agmt_t *
     if (s_runtime_recovery_armed) s_i2c.first_error = agmt_transport_error;
     return agmt_result;
 }
-/* Any raw auxiliary transaction in DMP mode is a harness failure. */
+/* The raw-mode regression fails at the first auxiliary status read. */
 icm20948_status_e icm20948_set_bank(icm20948_device_t *d, uint8_t b) {
-    (void)d; (void)b; ++raw_aux_calls; assert(!"raw SLV4 in DMP mode"); return ICM_20948_STAT_ERR;
+    assert(d == &s_sensor && raw_aux_nack && b == 0);
+    ++raw_aux_calls;
+    return ICM_20948_STAT_OK;
 }
 icm20948_status_e icm20948_execute_r(icm20948_device_t *d, uint8_t r, uint8_t *v, uint32_t n) {
-    assert(s_runtime_recovery_armed && d == &s_sensor && r == AGB0_REG_PWR_MGMT_1 && n == 1);
+    assert(s_runtime_recovery_armed && d == &s_sensor && n == 1);
+    if (r == AGB0_REG_I2C_MST_STATUS) {
+        assert(raw_aux_nack);
+        s_i2c.first_error = ESP_ERR_INVALID_RESPONSE;
+        s_i2c.failed_register = r;
+        return ICM_20948_STAT_ERR;
+    }
+    assert(r == AGB0_REG_PWR_MGMT_1);
     *v = runtime_sensor_asleep ? 0x41 : 0x01;
     return ICM_20948_STAT_OK;
 }
@@ -136,20 +238,25 @@ static void reset_test(void) {
     clock_us = 1000000;
     reset_result = ICM_20948_STAT_OK;
     agmt_result = ICM_20948_STAT_OK;
+    sample_mode_result = ICM_20948_STAT_OK;
     agmt_transport_error = ESP_OK;
-    runtime_sensor_asleep = false;
+    runtime_sensor_asleep = raw_aux_nack = false;
     s_runtime_recovery_armed = false;
     s_i2c_config.dev_handle = (void *)2;
     memset(&s_i2c, 0, sizeof(s_i2c));
-    bus_resets = transport_attaches = transport_begins = 0;
+    bus_resets = sensor_resets = transport_attaches = transport_begins = 0;
+    device_removals = device_additions = 0;
+    added_clock_hz = 0;
     scl_level = sda_level = 1;
     s_sensor_ready = true;
     s_raw_read_failures = 0;
     s_dmp_reset_failures = 0;
     s_recovery_due_us = 0;
     s_recovery_delay_ms = 0;
+    s_recovery_sample_deadline_us = 0;
     s_startup_retries_left = IMU_STARTUP_RETRY_COUNT;
     s_reconfigure_on_retry = false;
+    s_i2c_clock_hz = CONFIG_BOARD_I2C_FREQUENCY_HZ;
     s_sensor._last_bank = 3;
     s_dmp_fifo_needs_reset = false;
     s_dmp_sequence = s_raw_sequence = 0;
@@ -387,7 +494,7 @@ static void test_timeout_schedules_fast_recovery(void) {
     assert(s_i2c.device == s_i2c_config.dev_handle);
 
     reset_test();
-    arm_runtime_recovery();
+    confirm_hardware_sample();
     unsigned errors = 0;
     imu_dmp_sample_t sample = {0};
     push(ICM_20948_STAT_FIFO_MORE_DATA_AVAIL, DMP_header_bitmap_Quat9, 1, 100);
@@ -422,6 +529,133 @@ static void test_recovery_only_arms_after_first_sample(void) {
     assert(transport_attaches == 1 && transport_begins == 1);
 }
 
+static void test_startup_keeps_probing_after_fast_retries(void) {
+    reset_test();
+    s_i2c_config.dev_handle = NULL;
+    s_sensor_ready = false;
+    sample_mode_result = ICM_20948_STAT_ERR;
+    shared.ble_connected = true;
+    assert(imu_manager_init() == ESP_OK);
+    assert(!s_sensor_ready && shared.imu_state == IMU_STATE_DEGRADED);
+    assert(device_additions == 1 && added_clock_hz == CONFIG_BOARD_I2C_FREQUENCY_HZ);
+    assert(sensor_resets == 1 && s_startup_retries_left == IMU_STARTUP_RETRY_COUNT);
+
+    for (unsigned left = IMU_STARTUP_RETRY_COUNT; left > 0; --left) {
+        assert(s_recovery_due_us == clock_us + IMU_STARTUP_RETRY_MS * 1000LL);
+        clock_us = s_recovery_due_us - 1;
+        const unsigned probes = bus_resets;
+        retry_sensor_if_due();
+        assert(bus_resets == probes);
+        ++clock_us;
+        retry_sensor_if_due();
+        assert(bus_resets == probes + 1 && s_startup_retries_left == left - 1);
+        assert(!s_sensor_ready && added_clock_hz == IMU_RECOVERY_CLOCK_HZ);
+    }
+    assert(s_recovery_due_us == clock_us + IMU_STARTUP_OFFLINE_RETRY_MS * 1000LL);
+
+    clock_us = s_recovery_due_us - 1;
+    retry_sensor_if_due();
+    assert(bus_resets == IMU_STARTUP_RETRY_COUNT);
+    ++clock_us;
+    retry_sensor_if_due();
+    assert(bus_resets == IMU_STARTUP_RETRY_COUNT + 1 && !s_startup_retries_left);
+    assert(s_recovery_due_us == clock_us + IMU_STARTUP_OFFLINE_RETRY_MS * 1000LL);
+    assert(!s_sensor_ready && shared.ble_connected && shared.imu_state == IMU_STATE_DEGRADED);
+
+    clock_us = s_recovery_due_us;
+    sample_mode_result = ICM_20948_STAT_OK;
+    retry_sensor_if_due();
+    assert(bus_resets == IMU_STARTUP_RETRY_COUNT + 2 && !s_startup_retries_left);
+    assert(s_sensor_ready && added_clock_hz == IMU_RECOVERY_CLOCK_HZ && sensor_resets == 1);
+    assert(!s_runtime_recovery_armed && !transport_attaches && !transport_begins);
+    const system_state_t state = shared;
+    assert(acquire_raw_sample(clock_us, &state));
+    assert(s_runtime_recovery_armed && transport_attaches == 1 && !transport_begins);
+}
+
+static void test_runtime_recovery_requires_real_acquisition(void) {
+    reset_test();
+    system_state_t state = {.imu_dmp = true, .ble_connected = true, .requested_imu_rate_hz = 100};
+    shared = state;
+    assert(acquire_raw_sample(clock_us, &state));
+    agmt_transport_error = ESP_ERR_TIMEOUT;
+    assert(!acquire_raw_sample(clock_us, &state));
+    clock_us = s_recovery_due_us - 1;
+    retry_sensor_if_due();
+    assert(!bus_resets && !s_sensor_ready);
+    ++clock_us;
+    retry_sensor_if_due();
+    assert(bus_resets == 1 && !device_additions && !device_removals);
+    assert(s_sensor_ready && shared.imu_state == IMU_STATE_DEGRADED);
+    assert(s_recovery_sample_deadline_us == clock_us + IMU_RECOVERY_SAMPLE_TIMEOUT_MS * 1000LL);
+    assert(buffered_raw_count == 1);
+
+    /* Identity and power reads succeed, but the subsequent raw SLV4 read NACKs. */
+    state.imu_dmp = false;
+    agmt_transport_error = ESP_OK;
+    raw_aux_nack = true;
+    assert(!acquire_raw_sample(clock_us, &state));
+    assert(raw_aux_calls == 1 && s_i2c.failed_register == AGB0_REG_I2C_MST_STATUS);
+    assert(shared.last_error == ESP_ERR_INVALID_RESPONSE && shared.i2c_errors == 2);
+    assert(!s_sensor_ready && shared.imu_state == IMU_STATE_DEGRADED);
+    assert(s_reconfigure_on_retry);
+    assert(s_recovery_due_us == clock_us + 4 * IMU_RECOVERY_FIRST_MS * 1000LL);
+    assert(buffered_raw_count == 1);
+
+    clock_us = s_recovery_due_us;
+    retry_sensor_if_due();
+    assert(bus_resets == 2 && device_removals == 1 && device_additions == 1);
+    assert(added_clock_hz == IMU_RECOVERY_CLOCK_HZ && transport_attaches == 2);
+    assert(s_i2c.device == s_i2c_config.dev_handle && s_i2c.device == (void *)3);
+    assert(s_sensor_ready && s_recovery_sample_deadline_us > clock_us);
+    assert(shared.imu_state == IMU_STATE_DEGRADED);
+
+    state.imu_dmp = true;
+    raw_aux_nack = false;
+    agmt_result = ICM_20948_STAT_ERR;
+    assert(!acquire_raw_sample(clock_us, &state));
+    assert(!s_sensor_ready && shared.imu_state == IMU_STATE_DEGRADED);
+    assert(s_recovery_due_us == clock_us + 16 * IMU_RECOVERY_FIRST_MS * 1000LL);
+    assert(buffered_raw_count == 1);
+
+    clock_us = s_recovery_due_us;
+    retry_sensor_if_due();
+    assert(bus_resets == 3 && device_additions == 2);
+    agmt_result = ICM_20948_STAT_OK;
+    assert(acquire_raw_sample(clock_us, &state));
+    assert(!s_recovery_sample_deadline_us && s_sensor_ready);
+    assert(shared.imu_state == IMU_STATE_RUNNING && buffered_raw_count == 2);
+    assert(shared.ble_connected && shared.requested_imu_rate_hz == 100);
+
+    agmt_transport_error = ESP_ERR_TIMEOUT;
+    assert(!acquire_raw_sample(clock_us, &state));
+    assert(s_recovery_due_us == clock_us + IMU_RECOVERY_FIRST_MS * 1000LL);
+}
+
+static void test_runtime_recovery_requires_dmp_frame_before_deadline(void) {
+    reset_test();
+    confirm_hardware_sample();
+    mark_sensor_unavailable(ESP_ERR_TIMEOUT);
+    clock_us = s_recovery_due_us;
+    retry_sensor_if_due();
+    const int64_t deadline = s_recovery_sample_deadline_us;
+    assert(deadline > clock_us && s_sensor_ready);
+    assert(shared.imu_state == IMU_STATE_DEGRADED);
+
+    unsigned errors = 0;
+    imu_dmp_sample_t sample = {0};
+    assert(!read_dmp_sample(&sample, &errors)); /* An empty FIFO can be normal. */
+    assert(!errors && shared.imu_state == IMU_STATE_DEGRADED);
+    clock_us = deadline - 1;
+    retry_sensor_if_due();
+    assert(s_sensor_ready && bus_resets == 1);
+    ++clock_us;
+    retry_sensor_if_due();
+    assert(!s_sensor_ready && shared.imu_state == IMU_STATE_DEGRADED);
+    assert(shared.last_error == ESP_ERR_TIMEOUT && s_reconfigure_on_retry);
+    assert(s_recovery_due_us == clock_us + 4 * IMU_RECOVERY_FIRST_MS * 1000LL);
+}
+
 int main(void) {
     test_independent_outputs();
     test_preserved_fifo_batch();
@@ -429,6 +663,9 @@ int main(void) {
     test_repeated_raw_failures_stop_acquisition();
     test_timeout_schedules_fast_recovery();
     test_recovery_only_arms_after_first_sample();
+    test_startup_keeps_probing_after_fast_retries();
+    test_runtime_recovery_requires_real_acquisition();
+    test_runtime_recovery_requires_dmp_frame_before_deadline();
     test_latest_and_abort();
     puts("PASS: Compass-only, quaternion-only, calibrated isolation, native counts, raw DMP publication, freshness boundary");
     puts("PASS: latest frame, incomplete rollback, frame/time backlog caps, reset failure, explicit reset invalidation (ASan/UBSan)");
@@ -440,5 +677,7 @@ int main(void) {
     puts("PASS: AGMT failure in raw/DMP modes invalidates magnetic and bank caches, increments dropped count, preserves published sample and sequence");
     puts("PASS: first runtime timeout schedules recovery; bus reset preserves handle; sleeping IMU requires reinitialization");
     puts("PASS: repeated failures before the first sample schedule a startup retry, and the first valid sample uses the stock transport");
+    puts("PASS: startup continues slow stock-driver probes at 100 kHz after three fast retries");
+    puts("PASS: runtime recovery stays degraded until a hardware sample, escalates on raw SLV4 NACK or empty DMP FIFO deadline");
     return 0;
 }
