@@ -5,11 +5,13 @@
 
 #define IMU_MAG_FRESHNESS_US 100000ULL
 #define IMU_MAG_POLL_PERIOD_US 10000ULL
+#define IMU_MAG_SLOW_FRAME_TIMEOUT_US 35000U
 
 typedef struct {
     int16_t x, y, z;
-    uint64_t updated_at_us;
+    uint64_t updated_at_us; /* Last complete measurement, including overflow. */
     uint64_t next_poll_us;
+    uint32_t frame_timeout_us; /* Zero selects the 20 ms normal-clock budget. */
     bool valid;
     bool overflow;
     bool needs_release;

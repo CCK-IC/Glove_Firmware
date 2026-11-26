@@ -42,7 +42,9 @@ static uint8_t first_attempt[512];
 static size_t first_length;
 static jmp_buf task_exit;
 enum { NORMAL, MTU_RACE, EXPIRY_RACE, EPOCH_RACE, RECONNECT_RACE, RETRY_EXPIRY,
-       DISCONNECT_EXPIRY_RACE, SNAPSHOT_RECONNECT_RACE, MBUF_RESERVE };
+       DISCONNECT_EXPIRY_RACE, SNAPSHOT_RECONNECT_RACE, MBUF_RESERVE,
+       ADC_RATE_RETRY, ADC_RATE_RESUBSCRIBE, ADC_RATE_UNSUBSCRIBE };
+enum { ADC_RATE_TEST_MTU = 25, ADC_RATE_TEST_WINDOW_US = 1200000 };
 static unsigned scenario;
 static void run_host(void);
 static void publish_raw(unsigned count);
@@ -177,6 +179,12 @@ static void publish_raw(unsigned count)
         ble_sample_buffer_publish_raw(&sample, epoch);
     }
 }
+static void publish_aux(void)
+{
+    uint32_t epoch = ble_sample_buffer_epoch(BLE_BUFFER_AUX);
+    adc_sample_t sample = {.sequence = 1, .timestamp_ms = (uint32_t)(now_us / 1000) - 100};
+    ble_sample_buffer_publish_aux(&sample, epoch);
+}
 static void vTaskDelay(TickType_t ticks)
 {
     (void)ticks;
@@ -187,6 +195,20 @@ static void vTaskDelay(TickType_t ticks)
     }
     if (scenario == SNAPSHOT_RECONNECT_RACE) return;
     if (scenario == MBUF_RESERVE) { mbuf_mem.mp_num_free = ATT_MBUF_RESERVE; return; }
+    if (scenario == ADC_RATE_RETRY || scenario == ADC_RATE_RESUBSCRIBE ||
+        scenario == ADC_RATE_UNSUBSCRIBE) {
+        now_us += ADC_RATE_TEST_WINDOW_US;
+        if (scenario != ADC_RATE_RETRY) {
+            subscribed[BLE_BUFFER_AUX - 1] = false;
+            ble_sample_buffer_set_enabled(BLE_BUFFER_AUX, false);
+        }
+        if (scenario == ADC_RATE_RESUBSCRIBE) {
+            subscribed[BLE_BUFFER_AUX - 1] = true;
+            ble_sample_buffer_set_enabled(BLE_BUFFER_AUX, true);
+            publish_aux();
+        }
+        return;
+    }
     assert(queued);
     if (scenario == MTU_RACE) state.mtu = 247;
     if (scenario == EXPIRY_RACE) now_us = 1499000;
@@ -216,6 +238,17 @@ static void reset(unsigned test)
     s_tx_ack = &sems[3]; sems[3] = (struct native_sem){0};
     subscribed[0] = true; ble_sample_buffer_set_enabled(1, true);
     publish_raw(2);
+}
+static void reset_adc_rate_test(unsigned test)
+{
+    reset(test);
+    auto_host = true;
+    state.mtu = ADC_RATE_TEST_MTU;
+    subscribed[BLE_BUFFER_RAW - 1] = false;
+    ble_sample_buffer_set_enabled(BLE_BUFFER_RAW, false);
+    subscribed[BLE_BUFFER_AUX - 1] = true;
+    ble_sample_buffer_set_enabled(BLE_BUFFER_AUX, true);
+    publish_aux();
 }
 static void run_task(void)
 { if (setjmp(task_exit) == 0) notification_task(NULL); }
@@ -276,5 +309,20 @@ int main(void)
     EXPECT(accepted == 6 && trace[0] == 1 && trace[1] == 2 && trace[2] == 3 &&
         trace[3] == 4 && trace[4] == 5 && trace[5] == 1,
         "MTU23 fragments rotate raw/DMP/AUX/status/battery within six-job budget");
+    unsigned aux_fragments = ble_batch_fragment_count(BLE_BATCH_AUX_SINGLE_SIZE, ADC_RATE_TEST_MTU);
+    unsigned aux_rate_hz = aux_fragments * 1000000U / ADC_RATE_TEST_WINDOW_US;
+    reset_adc_rate_test(ADC_RATE_RETRY); fail_attempts = 1; run_task();
+    EXPECT(accepted == aux_fragments && attempts == aux_fragments + 1 &&
+        state.actual_adc_notify_rate_hz == aux_rate_hz && state.actual_imu_notify_rate_hz == 0,
+        "ADC rate counts each accepted AUX fragment once over elapsed time");
+    reset_adc_rate_test(ADC_RATE_RESUBSCRIBE);
+    subscribed[GATT_STREAM_BATTERY - 1] = true;
+    run_task();
+    EXPECT(accepted == 2 * aux_fragments + 1 && trace[1] == GATT_STREAM_BATTERY &&
+        state.actual_adc_notify_rate_hz == aux_rate_hz && state.actual_imu_notify_rate_hz == 0,
+        "ADC rate excludes the previous subscription and battery packets");
+    reset_adc_rate_test(ADC_RATE_UNSUBSCRIBE); run_task();
+    EXPECT(accepted == aux_fragments && !state.actual_adc_notify_rate_hz,
+        "a window cannot publish AUX packets from an ended subscription");
     return failures ? 1 : 0;
 }

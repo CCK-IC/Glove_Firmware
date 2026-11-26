@@ -33,18 +33,32 @@ enum {
     IMU_RECOVERY_FIRST_MS = 50,
     IMU_RECOVERY_MAX_MS = 5000,
     IMU_RECOVERY_SAMPLE_TIMEOUT_MS = 2000,
+    IMU_RECOVERY_STABILITY_MS = 60000,
 };
+static enum {
+    RUNTIME_RESET_AVAILABLE,
+    RUNTIME_RESET_PENDING,
+    RUNTIME_RESET_USED,
+} s_runtime_reset;
 static unsigned s_raw_read_failures;
 static unsigned s_dmp_reset_failures;
 static int64_t s_recovery_due_us;
 /* Only the acquisition task writes this deadline. Other tasks read it under
  * s_device_lock when reporting a transport failure. */
 static int64_t s_recovery_sample_deadline_us;
+static int64_t s_recovery_stable_until_us;
 static unsigned s_recovery_delay_ms;
 static unsigned s_startup_retries_left;
 static uint32_t s_i2c_clock_hz = CONFIG_BOARD_I2C_FREQUENCY_HZ;
 static bool s_reconfigure_on_retry;
 static bool s_runtime_recovery_armed;
+#if CONFIG_IMU_RAW_ENABLED && !CONFIG_IMU_RAW_DUMMY
+enum { IMU_MAG_RETRY_MS = 5000, IMU_MAG_VECTOR_TIMEOUT_MS = 3000, IMU_MAG_IO_RETRIES = 3 };
+static uint64_t s_raw_mag_retry_due_us;
+static uint64_t s_raw_mag_vector_deadline_us;
+static unsigned s_raw_mag_poll_failures;
+static bool s_raw_mag_seen_vector;
+#endif
 #endif
 static SemaphoreHandle_t s_device_lock;
 static SemaphoreHandle_t s_dmp_sample_lock;
@@ -120,6 +134,87 @@ static void generate_dmp_sample(imu_dmp_sample_t *sample)
 } while (0)
 
 #if CONFIG_IMU_ENABLED
+static void log_i2c_failure(const char *operation, esp_err_t error);
+
+#if CONFIG_IMU_RAW_ENABLED && !CONFIG_IMU_RAW_DUMMY
+static void schedule_raw_mag_retry(uint64_t now_us)
+{
+    imu_magnetometer_invalidate(&s_magnetometer);
+    s_raw_mag_retry_due_us = now_us + IMU_MAG_RETRY_MS * 1000ULL;
+    ESP_LOGW(TAG, "Magnetometer unavailable; motion sampling continues, retrying in %d ms",
+             IMU_MAG_RETRY_MS);
+}
+
+static void configure_raw_magnetometer(void)
+{
+    s_raw_mag_seen_vector = false;
+    s_raw_mag_poll_failures = 0;
+    s_raw_mag_retry_due_us = 0;
+    const icm20948_status_e status = imu_magnetometer_configure(&s_sensor, &s_magnetometer, false);
+    const uint64_t now_us = esp_timer_get_time();
+    if (status == ICM_20948_STAT_OK) {
+        if (s_i2c_clock_hz <= IMU_RECOVERY_CLOCK_HZ)
+            s_magnetometer.frame_timeout_us = IMU_MAG_SLOW_FRAME_TIMEOUT_US;
+        s_raw_mag_vector_deadline_us = now_us + IMU_MAG_VECTOR_TIMEOUT_MS * 1000ULL;
+    } else {
+        if (s_i2c.first_error != ESP_OK) {
+            SYSTEM_STATE_INCREMENT(i2c_errors);
+            log_i2c_failure("Magnetometer configuration I2C failure", s_i2c.first_error);
+        }
+        system_state_set_error("imu_mag", s_i2c.first_error == ESP_OK ? ESP_FAIL : s_i2c.first_error);
+        schedule_raw_mag_retry(now_us);
+    }
+}
+
+static void poll_raw_magnetometer(uint64_t now_us)
+{
+    if (s_raw_mag_retry_due_us) {
+        if (now_us >= s_raw_mag_retry_due_us) {
+            if (s_runtime_recovery_armed) imu_i2c_begin(&s_i2c, IMU_STREAM_TIMEOUT_MS);
+            configure_raw_magnetometer();
+        }
+        return;
+    }
+    if (now_us < s_magnetometer.next_poll_us) return;
+
+    if (s_runtime_recovery_armed) imu_i2c_begin(&s_i2c, IMU_STREAM_TIMEOUT_MS);
+    const uint64_t previous_vector_us = s_magnetometer.updated_at_us;
+    const icm20948_status_e status = imu_magnetometer_poll(&s_sensor, &s_magnetometer, now_us);
+    const esp_err_t error = s_i2c.first_error;
+    if (status != ICM_20948_STAT_OK || error != ESP_OK) {
+        imu_magnetometer_invalidate(&s_magnetometer);
+        if (error != ESP_OK) {
+            SYSTEM_STATE_INCREMENT(i2c_errors);
+            if (!s_raw_mag_poll_failures)
+                log_i2c_failure("Magnetometer poll I2C failure", error);
+        }
+        if (++s_raw_mag_poll_failures >= IMU_MAG_IO_RETRIES ||
+            now_us >= s_raw_mag_vector_deadline_us) {
+            if (error == ESP_OK)
+                ESP_LOGW(TAG, "Magnetometer read incomplete: rc=%d after %lld us", (int)status,
+                         (long long)(esp_timer_get_time() - now_us));
+            system_state_set_error("imu_mag", error == ESP_OK ? ESP_FAIL : error);
+            schedule_raw_mag_retry(now_us);
+        }
+        return;
+    }
+
+    s_raw_mag_poll_failures = 0;
+    if (s_magnetometer.updated_at_us != previous_vector_us) {
+        s_raw_mag_vector_deadline_us = now_us + IMU_MAG_VECTOR_TIMEOUT_MS * 1000ULL;
+        if (s_magnetometer.valid && !s_raw_mag_seen_vector) {
+            s_raw_mag_seen_vector = true;
+            ESP_LOGI(TAG, "Magnetometer streaming; first valid vector=(%d, %d, %d)",
+                     s_magnetometer.x, s_magnetometer.y, s_magnetometer.z);
+        }
+    } else if (now_us >= s_raw_mag_vector_deadline_us) {
+        ESP_LOGW(TAG, "Magnetometer delivered no fresh vector; overflow=%d", s_magnetometer.overflow);
+        system_state_set_error("imu_mag", ESP_ERR_TIMEOUT);
+        schedule_raw_mag_retry(now_us);
+    }
+}
+#endif
+
 static esp_err_t configure_sensor(bool cold_start, bool reset_sensor)
 {
     memset(&s_magnetometer, 0, sizeof(s_magnetometer));
@@ -138,6 +233,7 @@ static esp_err_t configure_sensor(bool cold_start, bool reset_sensor)
 
     /* The driver initializes its bank cache, DMP state and bus interface. */
     icm20948_init_i2c(&s_sensor, &s_i2c_config);
+    s_i2c.first_error = ESP_OK;
 
     uint8_t identity = 0;
     icm20948_status_e status = ICM_20948_STAT_ERR;
@@ -160,6 +256,7 @@ static esp_err_t configure_sensor(bool cold_start, bool reset_sensor)
 
     if (reset_sensor) {
         vTaskDelay(pdMS_TO_TICKS(50));
+        if (s_runtime_recovery_armed) s_runtime_reset = RUNTIME_RESET_USED;
         status = icm20948_sw_reset(&s_sensor);
         if (status != ICM_20948_STAT_OK) {
             ESP_LOGE(TAG, "IMU init: icm20948_sw_reset failed: rc=%d (0x%x); continuing",
@@ -186,14 +283,8 @@ static esp_err_t configure_sensor(bool cold_start, bool reset_sensor)
     IMU_INIT_CHECK(icm20948_enable_dlpf(&s_sensor, ICM_20948_INTERNAL_GYR, false), ESP_FAIL);
 #if CONFIG_IMU_DMP_ENABLED
     /* Leave the AK09916 powered down for the DMP's single-shot controller. */
-    const bool dmp_owns_magnetometer = true;
-#else
-    const bool dmp_owns_magnetometer = false;
-#endif
-    IMU_INIT_CHECK(imu_magnetometer_configure(&s_sensor, &s_magnetometer, dmp_owns_magnetometer),
+    IMU_INIT_CHECK(imu_magnetometer_configure(&s_sensor, &s_magnetometer, true),
                    ESP_ERR_NOT_FOUND);
-
-#if CONFIG_IMU_DMP_ENABLED
     IMU_INIT_CHECK(icm20948_init_dmp_sensor_with_defaults(&s_sensor), ESP_FAIL);
     IMU_INIT_CHECK(inv_icm20948_enable_dmp_sensor(
         &s_sensor, INV_ICM20948_SENSOR_ORIENTATION, 1), ESP_FAIL);
@@ -218,6 +309,8 @@ static esp_err_t configure_sensor(bool cold_start, bool reset_sensor)
 #else
     SYSTEM_STATE_SET(actual_dmp_sample_rate_hz, 0);
 #endif
+#elif CONFIG_IMU_RAW_ENABLED && !CONFIG_IMU_RAW_DUMMY
+    configure_raw_magnetometer();
 #endif
     return ESP_OK;
 }
@@ -261,6 +354,7 @@ static void confirm_hardware_sample(void)
         ESP_LOGI(TAG, "IMU streaming; runtime I2C recovery armed");
     } else if (s_recovery_sample_deadline_us) {
         s_recovery_sample_deadline_us = 0;
+        s_recovery_stable_until_us = esp_timer_get_time() + IMU_RECOVERY_STABILITY_MS * 1000LL;
         SYSTEM_STATE_SET(imu_state, IMU_STATE_RUNNING);
         ESP_LOGI(TAG, "IMU recovered at %lu Hz I2C; hardware samples resumed",
                  (unsigned long)s_i2c_clock_hz);
@@ -293,11 +387,12 @@ static void mark_sensor_unavailable(esp_err_t error)
         schedule_startup_retry(error);
         return;
     }
-    if (s_recovery_sample_deadline_us) {
+    if (s_recovery_sample_deadline_us || esp_timer_get_time() < s_recovery_stable_until_us) {
         s_reconfigure_on_retry = true;
         schedule_runtime_retry(error);
     } else {
         s_reconfigure_on_retry = false;
+        s_runtime_reset = RUNTIME_RESET_AVAILABLE;
         s_recovery_delay_ms = IMU_RECOVERY_FIRST_MS;
         s_recovery_due_us = esp_timer_get_time() + s_recovery_delay_ms * 1000LL;
         system_state_set_error("imu", error);
@@ -400,7 +495,13 @@ static void retry_sensor_if_due(void)
                 s_i2c_clock_hz = IMU_RECOVERY_CLOCK_HZ;
                 ESP_LOGW(TAG, "Retrying IMU at %lu Hz I2C", (unsigned long)s_i2c_clock_hz);
             }
-            if (error == ESP_OK) error = configure_sensor(false, runtime_recovery);
+            if (error == ESP_OK) {
+                const bool reset_sensor = runtime_recovery && s_runtime_reset == RUNTIME_RESET_PENDING;
+                error = configure_sensor(false, reset_sensor);
+                if (runtime_recovery && error != ESP_OK &&
+                    s_runtime_reset == RUNTIME_RESET_AVAILABLE)
+                    s_runtime_reset = RUNTIME_RESET_PENDING;
+            }
             if (error == ESP_OK && runtime_recovery) {
                 s_i2c.device = s_i2c_config.dev_handle;
                 imu_i2c_attach(&s_i2c, &s_sensor);
@@ -604,11 +705,6 @@ static bool acquire_raw_sample(uint64_t now_us, const system_state_t *state)
     epoch = ble_sample_buffer_epoch(BLE_BUFFER_RAW);
     if (s_runtime_recovery_armed) imu_i2c_begin(&s_i2c, IMU_STREAM_TIMEOUT_MS);
     icm20948_status_e status = icm20948_get_agmt(&s_sensor, &sensor_data);
-    if (status == ICM_20948_STAT_OK && s_i2c.first_error == ESP_OK && !state->imu_dmp &&
-        imu_magnetometer_poll(&s_sensor, &s_magnetometer, now_us) != ICM_20948_STAT_OK &&
-        s_i2c.first_error == ESP_OK) {
-        system_state_set_error("imu_mag", ESP_FAIL);
-    }
     if (status != ICM_20948_STAT_OK || s_i2c.first_error != ESP_OK) {
         s_sensor._last_bank = 255;
         if (s_runtime_recovery_armed) s_sensor._last_mems_bank = 255;
@@ -625,6 +721,7 @@ static bool acquire_raw_sample(uint64_t now_us, const system_state_t *state)
         return false;
     }
     s_raw_read_failures = 0;
+    if (!state->imu_dmp) poll_raw_magnetometer(now_us);
     imu_magnetometer_apply(&s_magnetometer, &sample, esp_timer_get_time());
     confirm_hardware_sample();
     xSemaphoreGive(s_device_lock);

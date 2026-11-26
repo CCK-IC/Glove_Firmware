@@ -10,6 +10,7 @@
 #define imu_magnetometer_configure fake_magnetometer_configure
 #include "../../main/imu/imu_manager.c"
 #undef imu_magnetometer_configure
+#include "ak09916_registers.h"
 
 typedef struct {
     icm20948_status_e status;
@@ -20,9 +21,12 @@ typedef struct {
 static frame_t frames[16];
 static unsigned queued, consumed, fifo_reads, resets, reports, agmt_reads, raw_aux_calls;
 static int64_t clock_us;
-static icm20948_status_e reset_result, agmt_result, sample_mode_result;
+static icm20948_status_e reset_result, agmt_result, sample_mode_result, sensor_reset_result;
+static icm20948_status_e raw_aux_config_result;
 static esp_err_t agmt_transport_error;
-static bool runtime_sensor_asleep, raw_aux_nack;
+static bool runtime_sensor_asleep, raw_aux_nack, raw_aux_data_ready;
+static unsigned raw_aux_config_calls;
+static uint8_t raw_aux_register;
 static unsigned bus_resets, sensor_resets, transport_attaches, transport_begins;
 static unsigned device_removals, device_additions;
 static uint32_t added_clock_hz;
@@ -56,8 +60,9 @@ void system_state_write_field(size_t offset, const void *value, size_t size) {
     memcpy((char *)&shared + offset, value, size);
 }
 void system_state_set_error(const char *module, int32_t error) {
-    assert(!strcmp(module, "imu_fifo") || !strcmp(module, "imu"));
+    assert(!strcmp(module, "imu_fifo") || !strcmp(module, "imu") || !strcmp(module, "imu_mag"));
     shared.last_error = error;
+    snprintf(shared.last_error_module, sizeof(shared.last_error_module), "%s", module);
     ++reports;
 }
 i2c_master_bus_handle_t board_i2c_bus(void) { return (void *)1; }
@@ -90,7 +95,7 @@ void icm20948_init_i2c(icm20948_device_t *device, icm0948_config_i2c_t *config) 
 icm20948_status_e icm20948_sw_reset(icm20948_device_t *device) {
     assert(device == &s_sensor);
     ++sensor_resets;
-    return ICM_20948_STAT_OK;
+    return sensor_reset_result;
 }
 icm20948_status_e icm20948_sleep(icm20948_device_t *device, bool enabled) {
     assert(device == &s_sensor && !enabled);
@@ -122,8 +127,11 @@ icm20948_status_e icm20948_enable_dlpf(icm20948_device_t *device,
 }
 icm20948_status_e fake_magnetometer_configure(icm20948_device_t *device,
                                            imu_magnetometer_t *magnetometer, bool dmp) {
-    assert(device == &s_sensor && magnetometer == &s_magnetometer && dmp);
-    return ICM_20948_STAT_OK;
+    assert(device == &s_sensor && magnetometer == &s_magnetometer);
+    if (dmp) return ICM_20948_STAT_OK;
+    ++raw_aux_config_calls;
+    memset(magnetometer, 0, sizeof(*magnetometer));
+    return raw_aux_config_result;
 }
 icm20948_status_e icm20948_init_dmp_sensor_with_defaults(icm20948_device_t *device) {
     assert(device == &s_sensor);
@@ -205,26 +213,45 @@ icm20948_status_e icm20948_get_agmt(icm20948_device_t *device, icm20948_agmt_t *
     if (s_runtime_recovery_armed) s_i2c.first_error = agmt_transport_error;
     return agmt_result;
 }
-/* The raw-mode regression fails at the first auxiliary status read. */
 icm20948_status_e icm20948_set_bank(icm20948_device_t *d, uint8_t b) {
-    assert(d == &s_sensor && raw_aux_nack && b == 0);
-    ++raw_aux_calls;
+    assert(d == &s_sensor && (b == 0 || b == 3));
+    d->_last_bank = b;
     return ICM_20948_STAT_OK;
 }
 icm20948_status_e icm20948_execute_r(icm20948_device_t *d, uint8_t r, uint8_t *v, uint32_t n) {
-    assert(s_runtime_recovery_armed && d == &s_sensor && n == 1);
-    if (r == AGB0_REG_I2C_MST_STATUS) {
-        assert(raw_aux_nack);
-        s_i2c.first_error = ESP_ERR_INVALID_RESPONSE;
-        s_i2c.failed_register = r;
-        return ICM_20948_STAT_ERR;
+    assert(d == &s_sensor && n == 1);
+    if (d->_last_bank == 0) {
+        if (r == AGB0_REG_PWR_MGMT_1) {
+            *v = runtime_sensor_asleep ? 0x41 : 0x01;
+            return ICM_20948_STAT_OK;
+        }
+        assert(r == AGB0_REG_I2C_MST_STATUS);
+        ++raw_aux_calls;
+        if (raw_aux_nack) {
+            s_i2c.first_error = ESP_ERR_INVALID_RESPONSE;
+            s_i2c.failed_register = r;
+            return ICM_20948_STAT_ERR;
+        }
+        *v = 0x40; /* SLV4 completed. */
+        return ICM_20948_STAT_OK;
     }
-    assert(r == AGB0_REG_PWR_MGMT_1);
-    *v = runtime_sensor_asleep ? 0x41 : 0x01;
+    assert(d->_last_bank == 3 && (r == AGB3_REG_I2C_PERIPH4_CTRL || r == AGB3_REG_I2C_PERIPH4_DI));
+    *v = 0;
+    if (r == AGB3_REG_I2C_PERIPH4_DI) {
+        if (raw_aux_register == AK09916_REG_ST1 && raw_aux_data_ready) *v = 1;
+        if (raw_aux_register == AK09916_REG_HXL) *v = 12;
+    }
     return ICM_20948_STAT_OK;
 }
 icm20948_status_e icm20948_execute_w(icm20948_device_t *d, uint8_t r, uint8_t *v, uint32_t n) {
-    (void)d; (void)r; (void)v; (void)n; assert(0); return ICM_20948_STAT_ERR;
+    assert(d == &s_sensor && d->_last_bank == 3);
+    if (r == AGB3_REG_I2C_PERIPH4_ADDR) {
+        assert(n == 2 && v[0] == (MAG_AK09916_I2C_ADDR | 0x80));
+        raw_aux_register = v[1];
+    } else {
+        assert(r == AGB3_REG_I2C_PERIPH4_CTRL && n == 1);
+    }
+    return ICM_20948_STAT_OK;
 }
 static void reset_test(void) {
     memset(frames, 0, sizeof(frames));
@@ -239,6 +266,11 @@ static void reset_test(void) {
     reset_result = ICM_20948_STAT_OK;
     agmt_result = ICM_20948_STAT_OK;
     sample_mode_result = ICM_20948_STAT_OK;
+    sensor_reset_result = ICM_20948_STAT_OK;
+    raw_aux_config_result = ICM_20948_STAT_OK;
+    raw_aux_config_calls = 0;
+    raw_aux_register = 0;
+    raw_aux_data_ready = true;
     agmt_transport_error = ESP_OK;
     runtime_sensor_asleep = raw_aux_nack = false;
     s_runtime_recovery_armed = false;
@@ -254,6 +286,12 @@ static void reset_test(void) {
     s_recovery_due_us = 0;
     s_recovery_delay_ms = 0;
     s_recovery_sample_deadline_us = 0;
+    s_recovery_stable_until_us = 0;
+    s_runtime_reset = RUNTIME_RESET_AVAILABLE;
+    s_raw_mag_retry_due_us = 0;
+    s_raw_mag_vector_deadline_us = 0;
+    s_raw_mag_poll_failures = 0;
+    s_raw_mag_seen_vector = false;
     s_startup_retries_left = IMU_STARTUP_RETRY_COUNT;
     s_reconfigure_on_retry = false;
     s_i2c_clock_hz = CONFIG_BOARD_I2C_FREQUENCY_HZ;
@@ -575,7 +613,7 @@ static void test_startup_keeps_probing_after_fast_retries(void) {
 
 static void test_runtime_recovery_requires_real_acquisition(void) {
     reset_test();
-    system_state_t state = {.imu_dmp = true, .ble_connected = true, .requested_imu_rate_hz = 100};
+    const system_state_t state = {.imu_dmp = true, .ble_connected = true, .requested_imu_rate_hz = 100};
     shared = state;
     assert(acquire_raw_sample(clock_us, &state));
     agmt_transport_error = ESP_ERR_TIMEOUT;
@@ -590,12 +628,10 @@ static void test_runtime_recovery_requires_real_acquisition(void) {
     assert(s_recovery_sample_deadline_us == clock_us + IMU_RECOVERY_SAMPLE_TIMEOUT_MS * 1000LL);
     assert(buffered_raw_count == 1);
 
-    /* Identity and power reads succeed, but the subsequent raw SLV4 read NACKs. */
-    state.imu_dmp = false;
-    agmt_transport_error = ESP_OK;
-    raw_aux_nack = true;
+    /* Identity and power reads succeed, but the primary data read NACKs. */
+    agmt_transport_error = ESP_ERR_INVALID_RESPONSE;
     assert(!acquire_raw_sample(clock_us, &state));
-    assert(raw_aux_calls == 1 && s_i2c.failed_register == AGB0_REG_I2C_MST_STATUS);
+    assert(!raw_aux_calls);
     assert(shared.last_error == ESP_ERR_INVALID_RESPONSE && shared.i2c_errors == 2);
     assert(!s_sensor_ready && shared.imu_state == IMU_STATE_DEGRADED);
     assert(s_reconfigure_on_retry);
@@ -607,11 +643,11 @@ static void test_runtime_recovery_requires_real_acquisition(void) {
     assert(bus_resets == 2 && device_removals == 1 && device_additions == 1);
     assert(added_clock_hz == IMU_RECOVERY_CLOCK_HZ && transport_attaches == 2);
     assert(s_i2c.device == s_i2c_config.dev_handle && s_i2c.device == (void *)3);
+    assert(!sensor_resets);
     assert(s_sensor_ready && s_recovery_sample_deadline_us > clock_us);
     assert(shared.imu_state == IMU_STATE_DEGRADED);
 
-    state.imu_dmp = true;
-    raw_aux_nack = false;
+    agmt_transport_error = ESP_OK;
     agmt_result = ICM_20948_STAT_ERR;
     assert(!acquire_raw_sample(clock_us, &state));
     assert(!s_sensor_ready && shared.imu_state == IMU_STATE_DEGRADED);
@@ -626,10 +662,99 @@ static void test_runtime_recovery_requires_real_acquisition(void) {
     assert(!s_recovery_sample_deadline_us && s_sensor_ready);
     assert(shared.imu_state == IMU_STATE_RUNNING && buffered_raw_count == 2);
     assert(shared.ble_connected && shared.requested_imu_rate_hz == 100);
+    assert(!sensor_resets);
+
+    const int64_t stable_until = clock_us + IMU_RECOVERY_STABILITY_MS * 1000LL;
+    assert(s_recovery_stable_until_us == stable_until);
+    const int64_t sample_period_us = 10000;
+    clock_us = stable_until - 1 - (CONFIG_IMU_ERROR_REINIT_COUNT - 1) * sample_period_us;
+    agmt_transport_error = ESP_ERR_INVALID_RESPONSE;
+    for (unsigned i = 1; i < CONFIG_IMU_ERROR_REINIT_COUNT; ++i) {
+        assert(!acquire_raw_sample(clock_us, &state));
+        assert(s_sensor_ready && shared.imu_state == IMU_STATE_RUNNING);
+        clock_us += sample_period_us;
+    }
+    assert(!acquire_raw_sample(clock_us, &state));
+    assert(!s_sensor_ready && s_reconfigure_on_retry);
+    assert(s_recovery_due_us == clock_us + 64 * IMU_RECOVERY_FIRST_MS * 1000LL);
+
+    clock_us = s_recovery_due_us;
+    retry_sensor_if_due();
+    assert(bus_resets == 4 && device_additions == 3 && !sensor_resets);
+    agmt_transport_error = ESP_OK;
+    assert(acquire_raw_sample(clock_us, &state));
+    clock_us += IMU_RECOVERY_STABILITY_MS * 1000LL;
+    assert(acquire_raw_sample(clock_us, &state));
+    agmt_transport_error = ESP_ERR_TIMEOUT;
+    assert(!acquire_raw_sample(clock_us, &state));
+    assert(!s_reconfigure_on_retry);
+    assert(s_recovery_due_us == clock_us + IMU_RECOVERY_FIRST_MS * 1000LL);
+    clock_us = s_recovery_due_us;
+    retry_sensor_if_due();
+    assert(bus_resets == 5 && device_additions == 3 && !sensor_resets);
+}
+
+static void test_runtime_software_reset_budget(void) {
+    reset_test();
+    const system_state_t state = {.imu_dmp = true};
+    assert(acquire_raw_sample(clock_us, &state));
+    agmt_transport_error = ESP_ERR_TIMEOUT;
+    assert(!acquire_raw_sample(clock_us, &state));
+    runtime_sensor_asleep = true;
+    clock_us = s_recovery_due_us;
+    retry_sensor_if_due();
+    assert(!s_sensor_ready && s_reconfigure_on_retry);
+    assert(bus_resets == 1 && !device_additions && !sensor_resets);
+
+    sample_mode_result = ICM_20948_STAT_ERR;
+    sensor_reset_result = ICM_20948_STAT_ERR;
+    const unsigned backoff[] = {800, 3200, 5000, 5000};
+    for (unsigned attempt = 0; attempt < sizeof(backoff) / sizeof(backoff[0]); ++attempt) {
+        clock_us = s_recovery_due_us;
+        retry_sensor_if_due();
+        assert(!s_sensor_ready && shared.imu_state == IMU_STATE_DEGRADED);
+        assert(device_additions == attempt + 1 && added_clock_hz == IMU_RECOVERY_CLOCK_HZ);
+        assert(sensor_resets == (attempt == 0 ? 0 : 1));
+        assert(s_recovery_due_us == clock_us + backoff[attempt] * 1000LL);
+    }
+
+    sample_mode_result = ICM_20948_STAT_OK;
+    clock_us = s_recovery_due_us;
+    retry_sensor_if_due();
+    agmt_transport_error = ESP_OK;
+    assert(acquire_raw_sample(clock_us, &state));
+    assert(device_additions == 5 && sensor_resets == 1);
 
     agmt_transport_error = ESP_ERR_TIMEOUT;
     assert(!acquire_raw_sample(clock_us, &state));
-    assert(s_recovery_due_us == clock_us + IMU_RECOVERY_FIRST_MS * 1000LL);
+    assert(s_recovery_due_us == clock_us + IMU_RECOVERY_MAX_MS * 1000LL);
+    sample_mode_result = ICM_20948_STAT_ERR;
+    for (unsigned attempt = 0; attempt < 2; ++attempt) {
+        clock_us = s_recovery_due_us;
+        retry_sensor_if_due();
+        assert(!s_sensor_ready && device_additions == attempt + 6 && sensor_resets == 1);
+    }
+
+    sample_mode_result = ICM_20948_STAT_OK;
+    clock_us = s_recovery_due_us;
+    retry_sensor_if_due();
+    agmt_transport_error = ESP_OK;
+    assert(acquire_raw_sample(clock_us, &state));
+    clock_us += IMU_RECOVERY_STABILITY_MS * 1000LL;
+    assert(acquire_raw_sample(clock_us, &state));
+
+    agmt_transport_error = ESP_ERR_TIMEOUT;
+    assert(!acquire_raw_sample(clock_us, &state));
+    clock_us = s_recovery_due_us;
+    retry_sensor_if_due();
+    assert(!s_sensor_ready && device_additions == 8 && sensor_resets == 1);
+    sample_mode_result = ICM_20948_STAT_ERR;
+    clock_us = s_recovery_due_us;
+    retry_sensor_if_due();
+    assert(!s_sensor_ready && device_additions == 9 && sensor_resets == 1);
+    clock_us = s_recovery_due_us;
+    retry_sensor_if_due();
+    assert(!s_sensor_ready && device_additions == 10 && sensor_resets == 2);
 }
 
 static void test_runtime_recovery_requires_dmp_frame_before_deadline(void) {
@@ -656,6 +781,71 @@ static void test_runtime_recovery_requires_dmp_frame_before_deadline(void) {
     assert(s_recovery_due_us == clock_us + 4 * IMU_RECOVERY_FIRST_MS * 1000LL);
 }
 
+static void test_raw_magnetometer_retry_preserves_motion(void) {
+    reset_test();
+    const system_state_t state = {.imu_state = IMU_STATE_RUNNING, .actual_raw_sample_rate_hz = 100};
+    shared = state;
+    raw_aux_config_result = ICM_20948_STAT_ERR;
+    configure_raw_magnetometer();
+    assert(raw_aux_config_calls == 1 && !strcmp(shared.last_error_module, "imu_mag"));
+    assert(shared.last_error == ESP_FAIL);
+    assert(s_raw_mag_retry_due_us == (uint64_t)clock_us + IMU_MAG_RETRY_MS * 1000ULL);
+    assert(acquire_raw_sample(clock_us, &state));
+    assert(s_runtime_recovery_armed && s_sensor_ready);
+    assert(!(s_latest_raw_sample.flags & IMU_RAW_FLAG_MAG_VALID));
+
+    raw_aux_config_result = ICM_20948_STAT_OK;
+    clock_us = s_raw_mag_retry_due_us - 1;
+    assert(acquire_raw_sample(clock_us, &state));
+    assert(raw_aux_config_calls == 1 && !raw_aux_calls);
+    ++clock_us;
+    assert(acquire_raw_sample(clock_us, &state));
+    assert(raw_aux_config_calls == 2 && !(s_latest_raw_sample.flags & IMU_RAW_FLAG_MAG_VALID));
+    clock_us += IMU_MAG_POLL_PERIOD_US;
+    assert(acquire_raw_sample(clock_us, &state));
+    assert(s_latest_raw_sample.flags & IMU_RAW_FLAG_MAG_VALID);
+    assert(s_latest_raw_sample.mag_x == 12);
+
+    const uint8_t motion_flags = IMU_RAW_FLAG_VALID | IMU_RAW_FLAG_ACCEL_VALID |
+                                 IMU_RAW_FLAG_GYRO_VALID | IMU_RAW_FLAG_TEMP_VALID;
+    raw_aux_nack = true;
+    for (unsigned attempt = 1; attempt <= IMU_MAG_IO_RETRIES; ++attempt) {
+        clock_us += IMU_MAG_POLL_PERIOD_US;
+        assert(acquire_raw_sample(clock_us, &state));
+        assert((s_latest_raw_sample.flags & motion_flags) == motion_flags);
+        assert(!(s_latest_raw_sample.flags & IMU_RAW_FLAG_MAG_VALID));
+        assert(s_latest_raw_sample.accel_x == 123 && s_latest_raw_sample.gyro_y == -456);
+        assert(shared.i2c_errors == attempt && !shared.dropped_raw_samples);
+        assert(s_sensor_ready && shared.imu_state == IMU_STATE_RUNNING && !s_recovery_due_us);
+    }
+    assert(shared.last_error == ESP_ERR_INVALID_RESPONSE);
+    assert(!strcmp(shared.last_error_module, "imu_mag"));
+    assert(s_raw_mag_retry_due_us == (uint64_t)clock_us + IMU_MAG_RETRY_MS * 1000ULL);
+
+    const unsigned aux_reads = raw_aux_calls;
+    clock_us = s_raw_mag_retry_due_us - 1;
+    assert(acquire_raw_sample(clock_us, &state));
+    assert(raw_aux_config_calls == 2 && raw_aux_calls == aux_reads);
+    raw_aux_nack = false;
+    ++clock_us;
+    assert(acquire_raw_sample(clock_us, &state));
+    assert(raw_aux_config_calls == 3);
+    clock_us += IMU_MAG_POLL_PERIOD_US;
+    assert(acquire_raw_sample(clock_us, &state));
+    assert(s_latest_raw_sample.flags & IMU_RAW_FLAG_MAG_VALID);
+
+    raw_aux_data_ready = false;
+    clock_us += IMU_MAG_VECTOR_TIMEOUT_MS * 1000LL - 1;
+    assert(acquire_raw_sample(clock_us, &state));
+    assert(!s_raw_mag_retry_due_us && !(s_latest_raw_sample.flags & IMU_RAW_FLAG_MAG_VALID));
+    clock_us += IMU_MAG_POLL_PERIOD_US;
+    assert(acquire_raw_sample(clock_us, &state));
+    assert(s_raw_mag_retry_due_us == (uint64_t)clock_us + IMU_MAG_RETRY_MS * 1000ULL);
+    assert(shared.last_error == ESP_ERR_TIMEOUT && !strcmp(shared.last_error_module, "imu_mag"));
+    assert(shared.raw_sample_count == buffered_raw_count && s_raw_sequence == buffered_raw_count);
+    assert(!device_additions && !bus_resets && !sensor_resets && !shared.dropped_raw_samples);
+}
+
 int main(void) {
     test_independent_outputs();
     test_preserved_fifo_batch();
@@ -665,7 +855,9 @@ int main(void) {
     test_recovery_only_arms_after_first_sample();
     test_startup_keeps_probing_after_fast_retries();
     test_runtime_recovery_requires_real_acquisition();
+    test_runtime_software_reset_budget();
     test_runtime_recovery_requires_dmp_frame_before_deadline();
+    test_raw_magnetometer_retry_preserves_motion();
     test_latest_and_abort();
     puts("PASS: Compass-only, quaternion-only, calibrated isolation, native counts, raw DMP publication, freshness boundary");
     puts("PASS: latest frame, incomplete rollback, frame/time backlog caps, reset failure, explicit reset invalidation (ASan/UBSan)");
@@ -678,6 +870,7 @@ int main(void) {
     puts("PASS: first runtime timeout schedules recovery; bus reset preserves handle; sleeping IMU requires reinitialization");
     puts("PASS: repeated failures before the first sample schedule a startup retry, and the first valid sample uses the stock transport");
     puts("PASS: startup continues slow stock-driver probes at 100 kHz after three fast retries");
-    puts("PASS: runtime recovery stays degraded until a hardware sample, escalates on raw SLV4 NACK or empty DMP FIFO deadline");
+    puts("PASS: runtime recovery requires real samples, retains backoff for 60 seconds, and limits software resets");
+    puts("PASS: raw magnetometer failures keep motion streaming and retry independently");
     return 0;
 }

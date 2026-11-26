@@ -251,7 +251,7 @@ size_t ble_batch_encode_status(uint8_t *out, size_t capacity, const system_state
     p[19] = APP_VERSION_MINOR;
     p[20] = APP_VERSION_PATCH;
     p[21] = state->phy;
-    u16(p + 22, 3);
+    u16(p + 22, 0x0007); /* Batched, fixed peer slot, ADC notification rate. */
     u32(p + 24, esp_get_free_heap_size());
     u32(p + 28, state->dropped_notifications);
     u32(p + 32, state->fifo_overflows);
@@ -259,6 +259,7 @@ size_t ble_batch_encode_status(uint8_t *out, size_t capacity, const system_state
     u32(p + 40, state->dropped_sensor_samples);
     u32(p + 44, state->raw_sample_count);
     u32(p + 48, (uint32_t)state->last_error);
+    u16(frame + BLE_BATCH_STATUS_BASE_SIZE, (uint16_t)state->actual_adc_notify_rate_hz);
     memcpy(out, frame, sizeof(frame));
     return sizeof(frame);
 }

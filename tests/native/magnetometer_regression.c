@@ -13,7 +13,7 @@
 
 enum { DONE = 0x40, NACK = 0x10, LOST_ARB = 0x20, TIMEOUT = 0x100 };
 enum { MAG_FLAGS = IMU_RAW_FLAG_MAG_VALID | IMU_RAW_FLAG_MAG_OVERFLOW };
-enum { TRACE_CAPACITY = 64 };
+enum { TRACE_CAPACITY = 64, READY_TRANSACTIONS = 8 };
 static const uint64_t START = 1000000;
 static const icm20948_status_e HOST_ERROR = ICM_20948_STAT_PARAM_ERR;
 
@@ -28,7 +28,7 @@ static struct {
     uint8_t bank;
     transaction_t trace[TRACE_CAPACITY];
     unsigned transactions, host_calls, fail_host, fault_transaction, fault;
-    unsigned status_reads, pending_polls, completion_polls, status_step_us;
+    unsigned reg_reads, reg_writes, status_reads, pending_polls, completion_polls, status_step_us;
     unsigned cancels, delays;
     unsigned ctrl_reads, fail_cancels, fail_ctrl_reads, fail_start_transaction;
     unsigned setup_stall_us, di_stall_us;
@@ -43,7 +43,7 @@ static struct {
     int64_t now_us, reset_at_us;
     int64_t master_reset_at_us, transaction_started_at_us;
     bool active, locked, bank_error_pending, bad_mode_readback;
-    bool stop_stuck, gate_required, master_enabled;
+    bool stop_stuck, gate_required, master_enabled, truncate_setup;
 } hw;
 
 /* One-shot failures enumerate every host/API seam on the successful path. */
@@ -67,7 +67,7 @@ int64_t esp_timer_get_time(void)
 
 void esp_rom_delay_us(uint32_t us)
 {
-    assert(us >= 100);
+    assert(us > 0);
     ++hw.delays;
     if (hw.recovery_stage == 2 && us >= 10000) ++hw.recovery_delays;
     hw.now_us += us;
@@ -140,6 +140,7 @@ icm20948_status_e icm20948_execute_r(icm20948_device_t *device, uint8_t reg,
                                     uint8_t *data, uint32_t len)
 {
     if (!host_step(device, true)) return HOST_ERROR;
+    ++hw.reg_reads;
     assert(data && len == 1 && device->_last_bank == hw.bank);
     if (hw.bank == 0 && reg == AGB0_REG_I2C_MST_STATUS) {
         *data = master_status();
@@ -168,7 +169,19 @@ icm20948_status_e icm20948_execute_w(icm20948_device_t *device, uint8_t reg,
                                     uint8_t *data, uint32_t len)
 {
     if (!host_step(device, true)) return HOST_ERROR;
-    assert(data && len == 1 && hw.bank == 3 && device->_last_bank == 3);
+    ++hw.reg_writes;
+    assert(data && hw.bank == 3 && device->_last_bank == 3);
+    if (len == 2) {
+        assert(reg == AGB3_REG_I2C_PERIPH4_ADDR);
+        hw.addr = *data++;
+        if (hw.truncate_setup) {
+            hw.bank_error_pending = true;
+            return HOST_ERROR; /* ADDR was accepted, REG was never written. */
+        }
+        ++reg;
+    } else {
+        assert(len == 1);
+    }
     switch (reg) {
     case AGB3_REG_I2C_PERIPH4_ADDR: hw.addr = *data; break;
     case AGB3_REG_I2C_PERIPH4_REG:
@@ -342,7 +355,6 @@ static void load_axes(int16_t x, int16_t y, int16_t z, uint8_t st2)
         hw.ak[AK09916_REG_HXL + 2 * i] = (uint8_t)(uint16_t)axes[i];
         hw.ak[AK09916_REG_HXL + 2 * i + 1] = (uint8_t)((uint16_t)axes[i] >> 8);
     }
-    hw.ak[AK09916_REG_HXL + 6] = 0x6d; /* TMPS must be consumed too. */
     hw.ak[AK09916_REG_ST2] = st2;
     hw.ak[AK09916_REG_ST1] = 1;
 }
@@ -350,9 +362,11 @@ static void load_axes(int16_t x, int16_t y, int16_t z, uint8_t st2)
 static void expect_ready_trace(unsigned offset)
 {
     expect_transaction(offset, AK09916_REG_ST1, true, 1);
-    for (unsigned i = 0; i < 8; ++i)
+    for (unsigned i = 0; i < 6; ++i)
         expect_transaction(offset + 1 + i, AK09916_REG_HXL + i, true,
                            hw.ak[AK09916_REG_HXL + i]);
+    expect_transaction(offset + READY_TRANSACTIONS - 1, AK09916_REG_ST2, true,
+                       hw.ak[AK09916_REG_ST2]);
 }
 
 static void test_configure(void)
@@ -636,7 +650,7 @@ static void test_ready_and_throttle(void)
         imu_magnetometer_t mag = {0};
         load_axes(values[v][0], values[v][1], values[v][2], 0);
         assert(imu_magnetometer_poll(&hw.device, &mag, START) == ICM_20948_STAT_OK);
-        assert(hw.transactions == 9 && !hw.locked && !mag.needs_release);
+        assert(hw.transactions == READY_TRANSACTIONS && !hw.locked && !mag.needs_release);
         expect_ready_trace(0);
         assert(mag.valid && !mag.overflow && mag.updated_at_us == START);
         assert(mag.x == values[v][0] && mag.y == values[v][1] && mag.z == values[v][2]);
@@ -646,14 +660,14 @@ static void test_ready_and_throttle(void)
         load_axes(7, 8, 9, 0);
         for (uint64_t t = START; t < START + 10000; t += 9999)
             assert(imu_magnetometer_poll(&hw.device, &mag, t) == ICM_20948_STAT_OK);
-        assert(hw.host_calls == calls && hw.transactions == 9);
+        assert(hw.host_calls == calls && hw.transactions == READY_TRANSACTIONS);
         assert(mag.x == values[v][0] && mag.updated_at_us == START);
         assert(imu_magnetometer_poll(&hw.device, &mag, START + 10000) == ICM_20948_STAT_OK);
-        assert(hw.transactions == 18 && mag.x == 7 && mag.y == 8 && mag.z == 9);
+        assert(hw.transactions == 2 * READY_TRANSACTIONS && mag.x == 7 && mag.y == 8 && mag.z == 9);
         assert(mag.updated_at_us == START + 10000);
-        expect_ready_trace(9);
+        expect_ready_trace(READY_TRANSACTIONS);
     }
-    puts("PASS: HXL..ST2 exactly once, signed axes, 100Hz throttle including exact boundary");
+    puts("PASS: six axis bytes then ST2 exactly once, signed axes, 100Hz throttle at exact boundary");
 }
 
 static void test_not_ready_and_freshness(void)
@@ -689,8 +703,8 @@ static void test_overflow_and_update(void)
     imu_magnetometer_update(&mag, 10, 20, 30, START);
     load_axes(-1, -2, -3, 8);
     assert(imu_magnetometer_poll(&hw.device, &mag, START + 10000) == ICM_20948_STAT_OK);
-    assert(hw.transactions == 9 && !mag.valid && mag.overflow && !mag.needs_release);
-    assert(mag.updated_at_us == START && !hw.locked);
+    assert(hw.transactions == READY_TRANSACTIONS && !mag.valid && mag.overflow && !mag.needs_release);
+    assert(mag.updated_at_us == START + 10000 && !hw.locked);
     expect_apply(&mag, START + 10000, IMU_RAW_FLAG_MAG_OVERFLOW);
     imu_magnetometer_update(&mag, INT16_MIN, -1, INT16_MAX, START + 20000);
     assert(mag.valid && !mag.overflow && mag.updated_at_us == START + 20000);
@@ -781,7 +795,12 @@ static void test_bus_errors_and_stale_done(void)
     hw.status = DONE;
     load_axes(-100, 200, -300, 0);
     assert(imu_magnetometer_poll(&hw.device, &mag, START) == ICM_20948_STAT_OK);
-    assert(hw.transactions == 9 && hw.status_reads == 36);
+    assert(hw.transactions == READY_TRANSACTIONS && hw.status_reads == 25);
+    /* At three completion reads per byte, the previous nine-byte sequence
+     * used 36 status reads, 9 DI reads and 27 writes before bank selection. */
+    assert(hw.reg_reads == 33 && hw.reg_writes == 16);
+    printf("PASS: ready-frame host register transfers fell from 72 to %u before bank selection\n",
+           hw.reg_reads + hw.reg_writes);
     assert(mag.valid && mag.x == -100 && mag.y == 200 && mag.z == -300);
     puts("PASS: startup recovers one-shot AUX faults; streaming faults retain 5ms bound; stale DONE is drained");
 }
@@ -792,12 +811,12 @@ static void test_acquisition_budget(void)
     imu_magnetometer_t mag = {0};
     const uint64_t sample_time = 123; /* Deliberately unrelated to esp_timer time. */
     hw.status_step_us = 500;
-    hw.completion_polls = 8; /* Each byte completes in 4ms, within its 5ms limit. */
+    hw.completion_polls = 7; /* A byte with pacing still fits its 5ms limit. */
     int64_t before = hw.now_us;
     assert(imu_magnetometer_poll(&hw.device, &mag, sample_time) == ICM_20948_STAT_OK);
     assert(hw.now_us - before < 5000 && hw.transactions == 1);
 
-    /* Nine individually successful bytes would take >20ms. A single budget
+    /* Eight individually successful bytes would take >20ms. A single budget
      * must span ST1 and the entire acquisition, rather than restarting per byte. */
     load_axes(123, -456, 789, 0);
     imu_magnetometer_update(&mag, 10, 20, 30, sample_time);
@@ -808,7 +827,7 @@ static void test_acquisition_budget(void)
     assert(hw.now_us - before >= 20000);
     assert(hw.now_us - before <= 20000 + (int64_t)hw.status_step_us);
     assert(!mag.valid && !mag.overflow && mag.needs_release);
-    assert(hw.transactions > count + 1 && hw.transactions < count + 9);
+    assert(hw.transactions > count + 1 && hw.transactions < count + READY_TRANSACTIONS);
     expect_apply(&mag, sample_time + 10000, 0);
 
     /* A budget abort after HXL has the same release obligation as a bus error. */
@@ -819,16 +838,40 @@ static void test_acquisition_budget(void)
     assert(imu_magnetometer_poll(&hw.device, &mag, sample_time + 30000) == ICM_20948_STAT_OK);
     expect_transaction(count, AK09916_REG_ST2, true, 0);
     expect_ready_trace(count + 1);
-    assert(hw.transactions == count + 10 && mag.valid && !mag.needs_release);
+    assert(hw.transactions == count + 1 + READY_TRANSACTIONS && mag.valid && !mag.needs_release);
     assert(mag.x == -321 && mag.y == 654 && mag.z == -987);
     assert(mag.updated_at_us == sample_time + 30000);
     puts("PASS: 20ms acquisition budget spans individually sub-5ms bytes and releases partial frame");
+
+    reset_hw();
+    mag = (imu_magnetometer_t){.frame_timeout_us = IMU_MAG_SLOW_FRAME_TIMEOUT_US};
+    hw.status_step_us = 500;
+    hw.completion_polls = 7;
+    load_axes(123, -456, 789, 0);
+    before = hw.now_us;
+    assert(imu_magnetometer_poll(&hw.device, &mag, sample_time) == ICM_20948_STAT_OK);
+    assert(hw.now_us - before > 20000 && hw.now_us - before < IMU_MAG_SLOW_FRAME_TIMEOUT_US);
+    assert(hw.transactions == READY_TRANSACTIONS && mag.valid && !mag.needs_release);
+    puts("PASS: the slow-clock budget accepts a complete frame that takes over 20ms");
+}
+
+static void test_paced_completion(void)
+{
+    reset_hw();
+    imu_magnetometer_t mag = {0};
+    hw.completion_polls = 1;
+    hw.completion_delay_us = 1150;
+    assert(imu_magnetometer_poll(&hw.device, &mag, START) == ICM_20948_STAT_OK);
+    assert(hw.transactions == 1 && hw.trace[0].completed && hw.delays > 0);
+    /* An unpaced poller would need five completion reads and one drain. */
+    assert(hw.status_reads < 6);
+    puts("PASS: pacing reduces status reads while waiting for hardware completion");
 }
 
 static void test_partial_release(void)
 {
     /* Fail each byte from HXL through ST2, then fail the release once too. */
-    for (unsigned byte = 0; byte < 8; ++byte) {
+    for (unsigned byte = 0; byte < READY_TRANSACTIONS - 1; ++byte) {
         reset_hw();
         imu_magnetometer_t mag = {0};
         imu_magnetometer_update(&mag, 3, 4, 5, START);
@@ -853,11 +896,31 @@ static void test_partial_release(void)
         assert(imu_magnetometer_poll(&hw.device, &mag, START + 20000) == ICM_20948_STAT_OK);
         expect_transaction(count, AK09916_REG_ST2, true, 0);
         expect_ready_trace(count + 1);
-        assert(hw.transactions == count + 10 && !hw.locked && !mag.needs_release);
+        assert(hw.transactions == count + 1 + READY_TRANSACTIONS && !hw.locked && !mag.needs_release);
         assert(mag.valid && mag.x == 321 && mag.y == -654 && mag.z == 987);
         assert(mag.updated_at_us == START + 20000);
     }
-    puts("PASS: all 8 partial read failures release ST2 before ST1/data; failed release retries safely");
+    puts("PASS: all axis/ST2 failures release ST2 before ST1/data; failed release retries safely");
+}
+
+static void test_truncated_setup(void)
+{
+    reset_hw();
+    imu_magnetometer_t mag = {0};
+    imu_magnetometer_update(&mag, 1, 2, 3, START);
+    load_axes(-1, -2, -3, 0);
+    hw.truncate_setup = true;
+    assert(imu_magnetometer_poll(&hw.device, &mag, START) == HOST_ERROR);
+    assert(hw.addr == (MAG_AK09916_I2C_ADDR | 0x80) && hw.reg == 0);
+    assert(hw.transactions == 0 && !hw.active && !mag.valid && mag.needs_recovery);
+    expect_apply(&mag, START, 0);
+
+    hw.truncate_setup = false;
+    assert(imu_magnetometer_poll(&hw.device, &mag, START + 10000) == ICM_20948_STAT_OK);
+    assert(hw.ctrl_reads == 1 && hw.transactions == READY_TRANSACTIONS);
+    expect_ready_trace(0);
+    assert(mag.valid && mag.x == -1 && mag.y == -2 && mag.z == -3);
+    puts("PASS: a truncated ADDR+REG write cannot arm SLV4 and the next poll recovers");
 }
 
 static void test_deadline_edges(void)
@@ -874,7 +937,7 @@ static void test_deadline_edges(void)
     reset_hw();
     mag = (imu_magnetometer_t){0};
     imu_magnetometer_update(&mag, 1, 2, 3, START);
-    hw.status_step_us = 1250; /* Drain + 3 polls: DONE arrives exactly at 5ms. */
+    hw.status_step_us = 1250; /* Drain + three paced polls: DONE arrives after 5ms. */
     assert(imu_magnetometer_poll(&hw.device, &mag, START) != ICM_20948_STAT_OK);
     assert(hw.transactions == 1 && hw.trace[0].completed && !mag.valid);
     expect_apply(&mag, START, 0);
@@ -885,12 +948,13 @@ static void test_deadline_edges(void)
         imu_magnetometer_update(&mag, 1, 2, 3, START);
         load_axes(-123, 456, -789, 0);
         hw.stall_reg = AK09916_REG_ST2;
-        /* All nine bytes complete, but the final DI host transfer returns late.
+        /* All eight bytes complete, but the final DI host transfer returns late.
          * Exercise both the 5ms byte limit and the capped 20ms poll limit. */
         hw.status_step_us = whole_budget ? 500 : 250;
-        hw.di_stall_us = whole_budget ? 2000 : 5000;
+        hw.completion_polls = whole_budget ? 4 : 3;
+        hw.di_stall_us = whole_budget ? 1250 : 5000;
         assert(imu_magnetometer_poll(&hw.device, &mag, START) != ICM_20948_STAT_OK);
-        assert(hw.transactions == 9 && hw.trace[8].completed && !hw.locked);
+        assert(hw.transactions == READY_TRANSACTIONS && hw.trace[READY_TRANSACTIONS - 1].completed && !hw.locked);
         assert(!mag.valid && !mag.overflow);
         assert(mag.updated_at_us == START && mag.x == 1 && mag.y == 2 && mag.z == 3);
         expect_apply(&mag, START, 0);
@@ -950,7 +1014,7 @@ static void test_confirmed_recovery_gate(void)
     assert(hw.ctrl_reads == 3 && !hw.gate_required);
     expect_transaction(3, AK09916_REG_ST2, true, 0);
     expect_ready_trace(4);
-    assert(hw.transactions == 13 && !hw.active && !hw.locked);
+    assert(hw.transactions == 4 + READY_TRANSACTIONS && !hw.active && !hw.locked);
     assert(!mag.needs_recovery && !mag.needs_release && mag.valid);
     assert(mag.x == 123 && mag.y == -456 && mag.z == 789);
     puts("PASS: configure/poll require confirmed CTRL EN=0; ambiguous start and failed cancellation stay gated; original error preserved");
@@ -973,6 +1037,8 @@ int main(void)
     test_host_errors();
     test_bus_errors_and_stale_done();
     test_partial_release();
+    test_truncated_setup();
+    test_paced_completion();
     test_acquisition_budget();
     test_deadline_edges();
     test_confirmed_recovery_gate();

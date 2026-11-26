@@ -156,7 +156,8 @@ static void test_invalid(void) {
 
 static system_state_t status_state(void) {
     return (system_state_t){.requested_imu_rate_hz=200, .actual_raw_sample_rate_hz=123,
-        .actual_dmp_sample_rate_hz=456, .actual_imu_notify_rate_hz=42, .battery_mv=4200,
+        .actual_dmp_sample_rate_hz=456, .actual_imu_notify_rate_hz=42,
+        .actual_adc_notify_rate_hz=321, .battery_mv=4200,
         .mtu=247, .imu_state=IMU_STATE_DEGRADED, .battery_percent=87,
         .ble_connected=true, .advertising=true, .pairing=true, .encrypted=true,
         .bonded=true, .slow_mode=true, .battery_low=true, .imu_dmp=true, .phy=2,
@@ -168,10 +169,10 @@ static system_state_t status_state(void) {
 static void test_status(void) {
     system_state_t state = status_state(), copy;
     memcpy(&copy, &state, sizeof(state));
-    uint8_t out[110]; memset(out, 0xa5, sizeof(out));
-    assert(ble_batch_encode_status(out + 1, 108, &state) == 108);
+    uint8_t out[BLE_BATCH_STATUS_SIZE + 2]; memset(out, 0xa5, sizeof(out));
+    assert(ble_batch_encode_status(out + 1, BLE_BATCH_STATUS_SIZE, &state) == BLE_BATCH_STATUS_SIZE);
     assert(!memcmp(&state, &copy, sizeof(state)));
-    assert(out[0] == 0xa5 && out[109] == 0xa5);
+    assert(out[0] == 0xa5 && out[sizeof(out) - 1] == 0xa5);
     assert(!memcmp(out + 1, (uint8_t[]){3,4,1,1}, 4));
     const uint8_t *p = out + 5;
     assert(le32(p) == 5); /* timer's ms wraps u32 */
@@ -185,13 +186,18 @@ static void test_status(void) {
     assert(p[14] == (CONFIG_TARGET_BOARD_XIAO_ESP32_C3 ? 1 : 2));
     assert(p[15] == IMU_STATE_DEGRADED && p[16] == 87 && p[17] == 255);
     assert(p[18] == APP_VERSION_MAJOR && p[19] == APP_VERSION_MINOR && p[20] == APP_VERSION_PATCH);
-    assert(p[21] == 2 && le16(p + 22) == 3);
+    assert(p[21] == 2 && le16(p + 22) == 7);
     assert(le32(p + 24) == UINT32_C(0x12345678));
     assert(le32(p + 28) == state.dropped_notifications);
     assert(le32(p + 32) == state.fifo_overflows && le32(p + 36) == state.i2c_errors);
     assert(le32(p + 40) == state.dropped_sensor_samples && le32(p + 44) == state.raw_sample_count);
     assert(le32(p + 48) == (uint32_t)INT32_MIN);
     zeros(p + 52, 52);
+    const uint8_t *extension = out + 1 + BLE_BATCH_STATUS_BASE_SIZE;
+    assert(le16(extension) == 321 && le16(extension + 2) == 0);
+    state.actual_adc_notify_rate_hz = 0;
+    assert(ble_batch_encode_status(out + 1, BLE_BATCH_STATUS_SIZE, &state) == BLE_BATCH_STATUS_SIZE);
+    assert(le16(p + 22) == 7 && le16(extension) == 0);
     unsigned tc = timer_calls, hc = heap_calls;
     for (size_t cap = 0; cap < BLE_BATCH_STATUS_SIZE; ++cap)
         REJECT(ble_batch_encode_status(invalid_out, cap, &state));
@@ -270,13 +276,14 @@ static void test_limits(void) {
         assert(ble_batch_sample_limit(k, (uint16_t)(row + 3)) == 1);
     }
     assert(!ble_batch_frame_size(0, 1) && !ble_batch_frame_size(5, 1));
-    assert(!ble_batch_frame_size(4, 2) && ble_batch_frame_size(4, 1) == 108);
+    assert(!ble_batch_frame_size(4, 2) && ble_batch_frame_size(4, 1) == BLE_BATCH_STATUS_SIZE);
     assert(!ble_batch_frame_size(1, SIZE_MAX));
     assert(!ble_batch_sample_limit(0, 247) && !ble_batch_sample_limit(5, 247));
     assert(!ble_batch_sample_limit(1, 22) && !ble_batch_sample_limit(1, 518));
     assert(!ble_batch_fragment_count(0, 23) && !ble_batch_fragment_count(513, 517));
     assert(!ble_batch_fragment_count(SIZE_MAX, 23));
-    assert(!ble_batch_fragment_count(108, 22) && !ble_batch_fragment_count(108, 65535));
+    assert(!ble_batch_fragment_count(BLE_BATCH_STATUS_SIZE, 22) &&
+           !ble_batch_fragment_count(BLE_BATCH_STATUS_SIZE, 65535));
     assert(ble_batch_fragment_count(512, 517) == 1);
     assert(ble_batch_fragment_count(512, 23) == 43);
 }
@@ -378,7 +385,7 @@ static void fixtures(const char *path) {
             }
             fputc(']', f);
         } else {
-            fprintf(f, ",\"expected\":{\"gloveId\":0,\"uptimeMs\":5,\"requestedRateHz\":200,\"actualRateHz\":123,\"notificationRateHz\":42,\"batteryMv\":4200,\"mtu\":247,\"boardId\":1,\"imuState\":3,\"batteryPercent\":87,\"flags\":255,\"firmware\":[%u,%u,%u],\"phy\":2,\"featureFlags\":3,\"freeHeapBytes\":305419896,\"droppedNotifications\":2309737967,\"fifoOverflows\":4294967295,\"i2cErrors\":305419896,\"droppedSensorSamples\":4275878552,\"rawSampleCount\":1985229328,\"lastError\":-2147483648}", APP_VERSION_MAJOR, APP_VERSION_MINOR, APP_VERSION_PATCH);
+            fprintf(f, ",\"expected\":{\"gloveId\":0,\"uptimeMs\":5,\"requestedRateHz\":200,\"actualRateHz\":123,\"notificationRateHz\":42,\"adcNotificationRateHz\":321,\"batteryMv\":4200,\"mtu\":247,\"boardId\":1,\"imuState\":3,\"batteryPercent\":87,\"flags\":255,\"firmware\":[%u,%u,%u],\"phy\":2,\"featureFlags\":7,\"freeHeapBytes\":305419896,\"droppedNotifications\":2309737967,\"fifoOverflows\":4294967295,\"i2cErrors\":305419896,\"droppedSensorSamples\":4275878552,\"rawSampleCount\":1985229328,\"lastError\":-2147483648}", APP_VERSION_MAJOR, APP_VERSION_MINOR, APP_VERSION_PATCH);
         }
         fprintf(f, ",\"frameId\":65535,\"fragmentsMtu23\":[");
         unsigned count = ble_batch_fragment_count(length, 23);

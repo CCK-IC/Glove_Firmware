@@ -1,4 +1,4 @@
-# Paired sensor batches, protocol v3 (firmware 1.4.0)
+# Paired sensor batches, protocol v3
 
 All integers are little endian. Every custom sensor notification uses v3. UUIDs
 are unchanged. Slot 0 is the transmitting/local glove. Slot 1 is reserved for a
@@ -46,9 +46,11 @@ Malformed frames are rejected atomically before emitting any sample.
 
 ## Status frame (kind=4)
 
-Status is a current snapshot, not a high-rate acquisition stream. Header is
-[3,4,presence_mask,1], followed by two fixed 52-byte status slots (108 total).
-Absent slot1 is zero. Slot fields:
+Status is a current snapshot. The header is `[3,4,presence_mask,1]`, followed by
+two fixed 52-byte status slots. Older v3 firmware ends here at 108 bytes.
+Firmware 1.5.0 appends two little-endian u16 ADC notification rates, one per
+slot, for a total of 112 bytes. Each absent slot and its appended rate are zero.
+The original slot fields retain their offsets.
 
 | Offset | Type | Field |
 |---|---|---|
@@ -64,7 +66,7 @@ Absent slot1 is zero. Slot fields:
 | 17 | u8 | existing device flags (connected/advertising/pairing/etc.) |
 | 18 | 3*u8 | firmware major/minor/patch |
 | 21 | u8 | PHY (0 unknown) |
-| 22 | u16 | feature flags: bit0 batched, bit1 fixed peer slot; value3 |
+| 22 | u16 | feature flags. Bit 0 marks batching, bit 1 marks fixed peer slots, bit 2 marks a supported ADC notification rate |
 | 24 | u32 | free_heap_bytes |
 | 28 | u32 | permanently dropped notifications |
 | 32 | u32 | FIFO recoveries/overflows counter (existing meaning) |
@@ -72,6 +74,18 @@ Absent slot1 is zero. Slot fields:
 | 40 | u32 | discarded sensor samples due to buffer/retry expiry |
 | 44 | u32 | raw samples acquired |
 | 48 | i32 | last_error |
+
+| Absolute offset | Type | Field |
+|---|---|---|
+| 108 | u16 | Slot 0 ADC notification packets per second |
+| 110 | u16 | Slot 1 ADC notification packets per second |
+
+For a 108-byte frame, each present slot has flags `0x0003`. In a 112-byte
+frame, a present slot with flags `0x0007` reports a rate, including a genuine
+zero. A present slot with flags `0x0003` has an unavailable rate and its appended
+value is zero. At least one present slot reports the rate in a 112-byte frame.
+The notification rate counts successful AUX notification submissions,
+including fragments. A notification can carry multiple ADC samples.
 
 Standard Bluetooth Battery Level (0x2A19) remains its specified one-byte value;
 battery measurements are also present in the paired v3 status snapshot.

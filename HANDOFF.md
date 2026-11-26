@@ -1,5 +1,38 @@
 # Firmware handoff
 
+## Firmware 1.5.0 and app 1.2.0, 2026-11-26
+
+- Firmware 1.5.0 includes the IMU recovery work documented below and adds
+  separate DMP, raw IMU, and ADC rate fields and firmware version to serial
+  diagnostics.
+- The v3 status frame is 112 bytes and reports ADC notification packets per
+  second alongside the existing IMU notification rate. App 1.2.0+5 decodes
+  both status lengths and displays the two notification rates independently.
+  [Status packet format](docs/BATCH_PROTOCOL_V3.md#status-frame-kind4)
+
+## IMU relapse and magnetometer follow-up — firmware 1.4.3, 2026-11-25
+
+- A runtime failure within 60 seconds of a recovered sample preserves the
+  backoff and goes directly to full reconfiguration. Full recovery first
+  reprograms the sensor and allows one software-reset attempt per instability
+  episode if reprogramming fails.
+- Raw accelerometer, gyroscope, and temperature samples remain available when
+  AK09916 setup or a magnetic read fails. Magnetometer recovery runs
+  independently. Firmware logs the first valid vector after setup.
+- The streaming SLV4 reader groups adjacent setup registers, reuses the
+  cleared completion status between bytes, and reads ST2 to release the
+  data latch. A native ready-frame test counted 49 host register transfers
+  before bank selections, down from 72. The native suites also cover
+  lost transfers, latch cleanup, and repeated IMU recovery.
+- The raw magnetometer has a 35 ms frame deadline at up to 100 kHz and a
+  20 ms deadline at the normal clock. The 5 ms per-byte limit applies at both
+  speeds.
+- On the connected C3 at MTU 247, the 1.4.2 capture after recovery had 681 raw
+  samples and zero with a valid magnetic flag. The 1.4.3 captures had valid
+  magnetic data on all 9,729 samples at 400 kHz and all 779 samples at 100 kHz.
+  No I²C errors were logged during either capture. Recurring bus failures
+  were exercised by fault injection in the native tests.
+
 ## IMU recovery verification — firmware 1.4.2, 2026-11-25
 
 - Runtime recovery keeps the IMU degraded until acquisition produces a valid

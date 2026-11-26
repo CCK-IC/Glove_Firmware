@@ -20,6 +20,7 @@ typedef struct {
     uint32_t requested_imu_rate_hz;
     uint32_t actual_dmp_sample_rate_hz;
     uint32_t actual_imu_notify_rate_hz;
+    uint32_t actual_adc_notify_rate_hz;
     uint32_t actual_raw_sample_rate_hz;
     uint32_t requested_adc_rate_hz;
     uint32_t actual_adc_sample_rate_hz;

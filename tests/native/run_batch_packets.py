@@ -97,7 +97,8 @@ for case in data["cases"]:
                 assert list(struct.unpack_from("<8h", frame, pos + 4)) == sample["values"]
                 assert fmt == data["active_aux_channels"]
     else:
-        assert len(frame) == 108 and frame[3] == 1 and frame[56:] == bytes(52)
+        assert len(frame) == 112 and frame[3] == 1
+        assert frame[56:108] == bytes(52) and frame[110:112] == bytes(2)
         fields = [("uptimeMs", "I", 0), ("requestedRateHz", "H", 4),
                   ("actualRateHz", "H", 6), ("notificationRateHz", "H", 8),
                   ("batteryMv", "H", 10), ("mtu", "H", 12), ("boardId", "B", 14),
@@ -109,5 +110,6 @@ for case in data["cases"]:
                   ("lastError", "i", 48)]
         for name, fmt, offset in fields:
             assert struct.unpack_from("<" + fmt, frame, 4 + offset)[0] == case["expected"][name], name
+        assert struct.unpack_from("<H", frame, 108)[0] == case["expected"]["adcNotificationRateHz"]
         assert list(frame[22:25]) == case["expected"]["firmware"]
 print("PASS: independent fixture decoding matches every expected sensor/status field")

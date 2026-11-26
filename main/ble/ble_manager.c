@@ -57,6 +57,12 @@ typedef struct {
     int64_t created_us;
 } pending_frame_t;
 
+typedef struct {
+    uint32_t imu;
+    uint32_t adc;
+    uint32_t adc_epoch;
+} notification_counts_t;
+
 static const struct {
     uint8_t *data;
     size_t capacity;
@@ -230,6 +236,7 @@ static void clear_connection_locked(void)
     s_connection_update_attempted = false;
     atomic_fetch_add(&s_connection_generation, 1);
     gatt_clear_subscriptions();
+    SYSTEM_STATE_SET(actual_adc_notify_rate_hz, 0);
     SYSTEM_STATE_SET(conn_handle, UINT16_MAX);
     SYSTEM_STATE_SET(mtu, 23);
     SYSTEM_STATE_SET(encrypted, false);
@@ -344,8 +351,10 @@ static int handle_gap_event(struct ble_gap_event *event, void *arg)
         /* Matching the handle also accepts bonded CCC restore events. */
         if (s_connection_handle != BLE_HS_CONN_HANDLE_NONE &&
             event->subscribe.conn_handle == s_connection_handle) {
-            gatt_set_subscription(event->subscribe.attr_handle,
-                event->subscribe.cur_notify && atomic_load(&s_notifications_enabled));
+            bool enabled = event->subscribe.cur_notify && atomic_load(&s_notifications_enabled);
+            gatt_set_subscription(event->subscribe.attr_handle, enabled);
+            if (!enabled && event->subscribe.attr_handle == gatt_stream_handle(BLE_BUFFER_AUX))
+                SYSTEM_STATE_SET(actual_adc_notify_rate_hz, 0);
         }
         xSemaphoreGive(s_connection_lock);
         return 0;
@@ -498,7 +507,7 @@ static void notification_host_event(struct ble_npl_event *event)
     xSemaphoreGive(s_tx_ack);
 }
 
-static void finish_host_job(uint32_t *sent_in_window, uint8_t *last_battery)
+static void finish_host_job(notification_counts_t *sent_in_window, uint8_t *last_battery)
 {
     if (!s_tx_pending || !atomic_load(&s_tx_done)) return;
     int rc = atomic_load(&s_tx_result);
@@ -522,8 +531,15 @@ static void finish_host_job(uint32_t *sent_in_window, uint8_t *last_battery)
                      frame->kind, rc, (unsigned long)failures);
         return; /* Keep the exact same fragment for a bounded retry. */
     }
-    if (frame->kind == BLE_BUFFER_RAW || frame->kind == BLE_BUFFER_DMP)
-        ++*sent_in_window;
+    if (frame->kind == BLE_BUFFER_RAW || frame->kind == BLE_BUFFER_DMP) {
+        ++sent_in_window->imu;
+    } else if (frame->kind == BLE_BUFFER_AUX) {
+        if (sent_in_window->adc_epoch != frame->epoch) {
+            sent_in_window->adc_epoch = frame->epoch;
+            sent_in_window->adc = 0;
+        }
+        ++sent_in_window->adc;
+    }
     ++frame->fragment;
     unsigned fragments = frame->kind == GATT_STREAM_BATTERY ? 1 :
         ble_batch_fragment_count(frame->length, frame->mtu);
@@ -655,7 +671,7 @@ static void notification_task(void *arg)
     int64_t rate_window_us = esp_timer_get_time();
     int64_t status_due_us = rate_window_us;
     unsigned connection_generation = 0;
-    uint32_t sent_in_window = 0;
+    notification_counts_t sent_in_window = {0};
     uint8_t last_battery = UINT8_MAX;
     unsigned cursor = 0;
 
@@ -676,7 +692,7 @@ static void notification_task(void *arg)
             memset(s_pending, 0, sizeof(s_pending));
             last_battery = UINT8_MAX;
             status_due_us = now_us;
-            sent_in_window = 0;
+            sent_in_window = (notification_counts_t){0};
             rate_window_us = now_us;
         }
         for (unsigned kind = 1; kind <= GATT_STREAM_COUNT; ++kind) {
@@ -745,10 +761,18 @@ static void notification_task(void *arg)
             finish_host_job(&sent_in_window, &last_battery);
         }
         now_us = esp_timer_get_time();
-        if (now_us - rate_window_us >= 1000000LL) {
+        int64_t elapsed_us = now_us - rate_window_us;
+        if (elapsed_us >= 1000000LL) {
             SYSTEM_STATE_SET(actual_imu_notify_rate_hz,
-                sent_in_window * 1000000ULL / (now_us - rate_window_us));
-            sent_in_window = 0;
+                sent_in_window.imu * 1000000ULL / elapsed_us);
+            /* Serialize publication with the ADC rate reset on teardown or unsubscribe. */
+            xSemaphoreTake(s_connection_lock, portMAX_DELAY);
+            bool adc_current = sent_in_window.adc && stream_is_current(
+                BLE_BUFFER_AUX, connection_generation, sent_in_window.adc_epoch);
+            SYSTEM_STATE_SET(actual_adc_notify_rate_hz,
+                adc_current ? sent_in_window.adc * 1000000ULL / elapsed_us : 0);
+            xSemaphoreGive(s_connection_lock);
+            sent_in_window = (notification_counts_t){0};
             rate_window_us = now_us;
         }
         TickType_t period = pdMS_TO_TICKS(streaming ? 5 : 50);
@@ -846,5 +870,6 @@ void ble_manager_stop_notifications(void)
     /* Startup may abort before the BLE mutex has been created. */
     if (s_connection_lock) xSemaphoreTake(s_connection_lock, portMAX_DELAY);
     ble_sample_buffer_disable_all();
+    SYSTEM_STATE_SET(actual_adc_notify_rate_hz, 0);
     if (s_connection_lock) xSemaphoreGive(s_connection_lock);
 }
